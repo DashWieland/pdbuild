@@ -27,11 +27,14 @@ surfaces are separate tiers, added later.
 from __future__ import annotations
 
 from .control import glide, smooth
+from .drums import hat, kick, snare
 from .effects import chorus, delay, saturate
 from .envelopes import ad_envelope, asr_envelope
 from .filters import bandpass, highpass, lowpass, resonant_lowpass
+from .voices import acid_voice, fm_voice, oscillator, subtractive_voice
 
 __all__ = [
+    # --- signal processors ---
     # envelopes
     "ad_envelope", "asr_envelope",
     # control
@@ -40,4 +43,8 @@ __all__ = [
     "lowpass", "highpass", "bandpass", "resonant_lowpass",
     # effects
     "saturate", "delay", "chorus",
+    # --- synth voices ---
+    "oscillator", "subtractive_voice", "acid_voice", "fm_voice",
+    # drum voices
+    "kick", "snare", "hat",
 ]
