@@ -219,6 +219,45 @@ a patch opened with `Patch.load` — the directory it came from. So you can extr
 an engine, reload, and extract again, nesting abstractions, and the audio stays
 identical.
 
+## Module library
+
+`pdbuild.modules` is a library of reusable DSP blocks. Each is a plain function
+`module(patch, input_port, **params) -> output_node` that adds its objects, wires
+the input, and returns the output — so they compose, and a composed chain can be
+`extract()`-ed into an abstraction.
+
+```python
+from pdbuild import Patch
+from pdbuild.modules import resonant_lowpass, saturate, delay
+
+p = Patch()
+saw = p.obj("phasor~ 110"); centred = p.obj("-~ 0.5"); p.link(saw, 0, centred, 0)
+tone  = resonant_lowpass(p, centred, cutoff=700, resonance=3.2)
+dirty = saturate(p, tone, drive=3)
+wide  = delay(p, dirty, time_ms=180, feedback=0.35)
+dac = p.obj("dac~"); p.link(wide, 0, dac, 0); p.link(wide, 0, dac, 1)
+```
+
+The first tier is the general-purpose **signal processors**:
+
+| Category | Modules |
+|---|---|
+| envelopes | `ad_envelope`, `asr_envelope` |
+| control | `glide`, `smooth` |
+| filters | `lowpass`, `highpass`, `bandpass`, `resonant_lowpass` |
+| effects | `saturate`, `delay`, `chorus` |
+
+**"Verified" is the point.** Every module's claim is backed by a rendered
+measurement, not by reading the patch — a lowpass drops the centroid, saturation
+grows odd harmonics on a sine, a delay leaves a tail after the input stops. A
+port is a node (its outlet 0) or a `(node, outlet)` pair, so a module can be fed
+from any outlet. Allocating modules (delay, chorus) take a `Patch.uid()` buffer
+name, so two never collide.
+
+Synth voices and input/control surfaces are separate tiers (input devices are
+the hard one — interaction, not sound, so a headless render can't fully verify
+them). See [../ROADMAP.md](../ROADMAP.md).
+
 ## `PdPatch` — the legacy emitter
 
 The original standalone builder, kept working and tested because `instruments/`
