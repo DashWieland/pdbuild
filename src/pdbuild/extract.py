@@ -73,6 +73,100 @@ def is_signal_outlet(text: str, outlet: int) -> bool:
     return True
 
 
+# --- resolving abstraction/subpatch outlets by their actual port objects ---- #
+#
+# is_signal_outlet keys off the `~` suffix, which is right for vanilla objects
+# but blind to abstraction instances ([acid303]), [clone name n], and [pd sub]:
+# their signal outlets have no `~` in the parent's text, so they mis-type as
+# control. That is what stops extract() being run on its own output. The ground
+# truth is in the referenced abstraction -- its inlet/outlet objects, indexed by
+# x-position exactly as Pd indexes the parent box's ports.
+
+_PORT_SIGNAL = {"inlet~": True, "outlet~": True, "inlet": False, "outlet": False}
+
+
+def _signature_from_ports(items) -> dict:
+    """(text, x) of an abstraction's port objects -> per-index signal flags."""
+    ins, outs = [], []
+    for text, x in items:
+        cls = text.split()[0] if text.split() else ""
+        if cls in ("inlet", "inlet~"):
+            ins.append((x, _PORT_SIGNAL[cls]))
+        elif cls in ("outlet", "outlet~"):
+            outs.append((x, _PORT_SIGNAL[cls]))
+    ins.sort(key=lambda t: t[0])
+    outs.sort(key=lambda t: t[0])
+    return {"inlets": [s for _x, s in ins], "outlets": [s for _x, s in outs]}
+
+
+def _abstraction_signature(name: str, search_dirs) -> dict | None:
+    """Port signature of ``<name>.pd`` found on ``search_dirs``, or None."""
+    from pathlib import Path
+    from py2pd import parse_file
+    for d in search_dirs:
+        if not d:
+            continue
+        f = Path(d) / f"{name}.pd"
+        if f.exists():
+            els = parse_file(str(f)).elements
+            items = [(getattr(e, "text", ""), getattr(getattr(e, "position", None), "x", 0))
+                     for e in els if getattr(e, "text", None) is not None]
+            return _signature_from_ports(items)
+    return None
+
+
+def _subpatch_signature(node) -> dict | None:
+    """Port signature of an inline ``[pd name]`` subpatch node."""
+    src = getattr(node, "src", None)
+    if src is None:
+        return None
+    items = []
+    for n in getattr(src, "nodes", []):
+        p = getattr(n, "parameters", {}) or {}
+        t = p.get("text")
+        if t is not None:
+            items.append((str(t), p.get("x_pos", 0)))
+    return _signature_from_ports(items)
+
+
+def resolve_signal_outlet(node, outlet: int, search_dirs=()) -> bool:
+    """Whether ``node``'s ``outlet`` carries a signal, resolving abstraction
+    instances, ``[clone]`` and ``[pd sub]`` against their real port objects.
+
+    Falls back to `is_signal_outlet` for vanilla objects (and for an
+    abstraction whose file is not on ``search_dirs`` -- unresolvable, so we
+    keep the old conservative answer rather than guess).
+    """
+    if type(node).__name__ == "Subpatch":
+        sig = _subpatch_signature(node)
+        if sig is not None and outlet < len(sig["outlets"]):
+            return sig["outlets"][outlet]
+        return False
+
+    text = node_text(node)
+    parts = text.split()
+    if not parts:
+        return False
+    cls = parts[0]
+
+    # [clone <name> n] or [clone -s 1 <name> n]: the outlets are the abstraction's
+    name = None
+    if cls == "clone":
+        for tok in parts[1:]:
+            if not tok.startswith("-") and not _is_number(tok):
+                name = tok
+                break
+    else:
+        name = cls
+
+    if name:
+        sig = _abstraction_signature(name, search_dirs)
+        if sig is not None:
+            return sig["outlets"][outlet] if outlet < len(sig["outlets"]) else False
+
+    return is_signal_outlet(text, outlet)
+
+
 # Named resources: connections that cross by NAME, invisible to the #X connect
 # graph. `argpos` is where the name sits in the whitespace-split text; role is
 # 'w' (writer/allocator), 'r' (reader), or 'rw' (both, e.g. [value]).
@@ -536,7 +630,7 @@ def extraction_plan(patch, region, *, broadcast: Sequence[str] = ()) -> dict:
 
 def extract(patch, region, name, out_dir, *, doc: str = "", font: int = 10,
             instance_pos=None, broadcast: Sequence[str] = (), on_warning="warn",
-            duplicate: Sequence[str] = ("loadbang",)):
+            duplicate: Sequence[str] = ("loadbang",), search_dirs: Sequence = ()):
     """Pull `region` out of `patch` into a sibling abstraction `<name>.pd`.
 
     Writes the abstraction to `out_dir`, rewrites `patch` in place to replace
@@ -557,9 +651,11 @@ def extract(patch, region, name, out_dir, *, doc: str = "", font: int = 10,
     both sides, per `duplicate`) is copied to each side rather than wired
     through a port, so the engine self-initialises and the parent keeps its own.
 
-    Scope: signal/outlet typing is resolved by class; the argument-sensitive
-    right inlet of the scalar-arithmetic family does not affect port typing
-    (the port type is inherited from the source outlet). Boundary send/receive
+    Signal/control port typing is inherited from the source outlet. Vanilla
+    objects resolve by class; abstraction instances, `[clone]` and `[pd sub]`
+    resolve against their real port objects, so `extract()` composes on its own
+    output -- `search_dirs` (plus `out_dir` and a loaded patch's `source_dir`)
+    is where the referenced `<name>.pd` files are found. Boundary send/receive
     are kept global rather than promoted to inlets -- the rig's own idiom.
 
     CAUTION -- the `name` must not collide with an object already on Pd's search
@@ -575,6 +671,17 @@ def extract(patch, region, name, out_dir, *, doc: str = "", font: int = 10,
     region = _canonical_region(patch, region)
     region_ids = {id(n) for n in region}
     parent_index = {id(n): i for i, n in enumerate(patch.pd.nodes)}
+
+    # Where to find the .pd of any abstraction the patch instantiates, so its
+    # outlet types resolve: the caller's dirs, the dir we write into, and the
+    # dir a loaded patch came from.
+    eff_dirs = list(search_dirs) + [out_dir]
+    src_dir = getattr(patch, "source_dir", None)
+    if src_dir:
+        eff_dirs.append(src_dir)
+
+    def _sig(node, outlet) -> bool:
+        return resolve_signal_outlet(node, outlet, eff_dirs)
 
     existing_ports = _region_port_boxes(region)
     if existing_ports:
@@ -623,7 +730,7 @@ def extract(patch, region, name, out_dir, *, doc: str = "", font: int = 10,
         key = (id(src), outlet)
         g = inbound.setdefault(key, {
             "src": src, "outlet": outlet, "targets": [],
-            "signal": is_signal_outlet(node_text(src), outlet),
+            "signal": _sig(src, outlet),
         })
         g["targets"].append((snk, inlet))
 
@@ -634,7 +741,7 @@ def extract(patch, region, name, out_dir, *, doc: str = "", font: int = 10,
         key = (id(src), outlet)
         g = outbound.setdefault(key, {
             "src": src, "outlet": outlet, "sinks": [],
-            "signal": is_signal_outlet(node_text(src), outlet),
+            "signal": _sig(src, outlet),
         })
         g["sinks"].append((snk, inlet))
 

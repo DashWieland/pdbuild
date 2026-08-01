@@ -111,13 +111,17 @@ class Patch:
 
     @classmethod
     def wrap(cls, patcher: Patcher, *, origin: tuple[int, int] = (20, 40),
-             step: int = 26, bottom: int = 720, column: int = 150) -> "Patch":
+             step: int = 26, bottom: int = 720, column: int = 150,
+             source_dir=None) -> "Patch":
         """Adopt an existing py2pd Patcher, e.g. one loaded from a file."""
         self = cls.__new__(cls)
         self.pd = patcher
         self.x, self.y = origin
         self.step, self.bottom, self.column = step, bottom, column
         self._loadbang = None
+        # Directory the patch came from, if any -- extract() searches it to
+        # resolve the port types of abstraction instances the patch references.
+        self.source_dir = str(source_dir) if source_dir is not None else None
         return self
 
     @classmethod
@@ -129,8 +133,13 @@ class Patch:
         file round-trips essentially byte-for-byte). Patches using ``#X
         declare`` or graph-on-parent are not yet supported on this path -- see
         the extract roadmap.
+
+        Records the file's directory as ``source_dir`` so a later ``extract``
+        can find the sibling abstraction files this patch instantiates.
         """
+        from pathlib import Path as _Path
         from py2pd import parse_file, to_builder
+        kw.setdefault("source_dir", _Path(str(path)).resolve().parent)
         return cls.wrap(to_builder(parse_file(str(path))), **kw)
 
     # -- placement ---------------------------------------------------------

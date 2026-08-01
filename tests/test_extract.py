@@ -541,3 +541,79 @@ def test_a_name_already_scoped_with_dollar_zero_is_left_alone():
 ])
 def test_resource_uses_extended(text, expected):
     assert _resource_uses(text) == expected
+
+
+# --------------------------------------------------------------------------- #
+# Composability: outlet typing for abstraction instances / clone / [pd sub]
+#
+# is_signal_outlet keys off the `~` suffix and so mis-types the signal outlet
+# of an abstraction instance as control -- which is what stopped extract() from
+# running on its own output. resolve_signal_outlet reads the real port objects.
+# --------------------------------------------------------------------------- #
+
+def _write_abs(tmp_path, name, ports):
+    """Write <name>.pd with the given port objects at increasing x.
+    `ports` is a list of ('inlet~'|'inlet'|'outlet~'|'outlet')."""
+    a = Patch(400, 300, 10)
+    a.pd.nodes = []
+    a.pd.connections = []
+    ins = [p for p in ports if "inlet" in p]
+    outs = [p for p in ports if "outlet" in p]
+    for i, p in enumerate(ins):
+        a.obj(p, 40 + 160 * i, 20)
+    for i, p in enumerate(outs):
+        a.obj(p, 40 + 160 * i, 240)
+    a.pd.canvas = (20, 20, 400, 300, 10)
+    a.save(tmp_path / f"{name}.pd")
+
+
+def test_resolve_abstraction_instance_outlet(tmp_path):
+    from pdbuild.extract import resolve_signal_outlet
+    _write_abs(tmp_path, "eng", ["inlet~", "outlet~", "outlet"])  # sig out 0, ctrl out 1
+    p = Patch()
+    inst = p.pd.add("eng", x_pos=10, y_pos=10, num_inlets=1, num_outlets=2)
+    assert resolve_signal_outlet(inst, 0, [str(tmp_path)]) is True
+    assert resolve_signal_outlet(inst, 1, [str(tmp_path)]) is False
+
+
+def test_resolve_clone_outlet(tmp_path):
+    from pdbuild.extract import resolve_signal_outlet
+    _write_abs(tmp_path, "eng", ["outlet~", "outlet"])
+    p = Patch()
+    for text in ("clone eng 4", "clone -s 1 eng 4"):
+        cl = p.obj(text)
+        assert resolve_signal_outlet(cl, 0, [str(tmp_path)]) is True
+        assert resolve_signal_outlet(cl, 1, [str(tmp_path)]) is False
+
+
+def test_resolve_subpatch_outlet():
+    from pdbuild.extract import resolve_signal_outlet
+    host = Patch()
+    inner = Patch(); inner.pd.nodes = []; inner.pd.connections = []
+    inner.obj("outlet~", 40, 20); inner.obj("outlet", 200, 20)
+    sub = host.pd.add_subpatch("s", inner.pd, x_pos=10, y_pos=10)
+    assert resolve_signal_outlet(sub, 0, []) is True
+    assert resolve_signal_outlet(sub, 1, []) is False
+
+
+def test_resolve_falls_back_for_vanilla_objects(tmp_path):
+    from pdbuild.extract import resolve_signal_outlet
+    p = Patch()
+    assert resolve_signal_outlet(p.obj("osc~ 440"), 0, [str(tmp_path)]) is True
+    assert resolve_signal_outlet(p.obj("metro 100"), 0, [str(tmp_path)]) is False
+    # an abstraction whose file is NOT on the path: stay conservative (control)
+    assert resolve_signal_outlet(p.obj("unknownabs"), 0, [str(tmp_path)]) is False
+
+
+def test_resolve_ports_ordered_by_x(tmp_path):
+    """A file that lists outlet~ AFTER outlet but at a smaller x: index follows
+    x, not file order (the same rule Pd uses)."""
+    from pdbuild.extract import resolve_signal_outlet
+    a = Patch(400, 300, 10); a.pd.nodes = []; a.pd.connections = []
+    a.obj("outlet", 200, 240)      # file first, but x=200 -> index 1
+    a.obj("outlet~", 40, 240)      # file second, but x=40  -> index 0
+    a.pd.canvas = (20, 20, 400, 300, 10)
+    a.save(tmp_path / "x.pd")
+    p = Patch(); inst = p.obj("x")
+    assert resolve_signal_outlet(inst, 0, [str(tmp_path)]) is True   # the x=40 outlet~
+    assert resolve_signal_outlet(inst, 1, [str(tmp_path)]) is False  # the x=200 outlet

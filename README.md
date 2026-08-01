@@ -209,10 +209,15 @@ and an abstraction that shadows one *silently never loads*. pdbuild is Pd-free
 and cannot check this; verify against a live Pd (the render step catches it — the
 extracted patch won't match the original).
 
-**Not composable yet.** Port typing keys off the `~` suffix, so a signal outlet
-on a box without one — an abstraction instance, `[pd sub]`, `[clone]` — types as
-control. Running `extract()` on its own output gives the second cut an `[inlet]`
-where it needs `[inlet~]`.
+### Composing on its own output
+
+`extract()` runs on patches it produced. An abstraction instance, `[clone]`, or
+`[pd sub]` has signal outlets with no `~` in its name, so port typing resolves
+them against the referenced abstraction's real port objects rather than the
+suffix. It finds the `<name>.pd` files on `search_dirs`, plus `out_dir` and — for
+a patch opened with `Patch.load` — the directory it came from. So you can extract
+an engine, reload, and extract again, nesting abstractions, and the audio stays
+identical.
 
 ## `PdPatch` — the legacy emitter
 

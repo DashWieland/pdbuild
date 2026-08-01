@@ -335,3 +335,69 @@ def test_loadbang_is_duplicated_across_the_cut(tmp_path):
     p.save(after_path)
     after = analyze(_render_full(after_path).audio)
     assert compare(after, before).similarity == pytest.approx(1.0, abs=1e-6)
+
+
+# --------------------------------------------------------------------------- #
+# Composability: extract() runs on its own output (nested abstractions)
+# --------------------------------------------------------------------------- #
+
+def test_extract_is_composable_on_its_own_output(tmp_path):
+    """The headline gap: an abstraction instance's signal outlet must type as
+    signal on the SECOND cut, or the nested abstraction gets an [outlet] and
+    goes silent. The region is JUST the [vfilt] instance, so its outlet IS the
+    boundary crossing -- if the resolver were still keyed off `~`, this renders
+    silent. Verified by ear. (Abstractions written next to the parent so Pd
+    finds them as siblings.)"""
+    p = Patch(600, 400, 10)
+    osc = p.obj("osc~ 220"); filt = p.obj("lop~ 800")
+    gain = p.obj("*~ 0.5"); dac = p.obj("dac~")
+    p.chain(osc, filt, gain); p.link(gain, 0, dac, 0); p.link(gain, 0, dac, 1)
+
+    flat = tmp_path / "flat.pd"; p.save(flat)
+    before = analyze(_render_full(flat).audio)
+
+    # first cut: pull the filter into [vfilt] (1 signal inlet, 1 signal outlet)
+    extract(p, [filt], "vfilt", str(tmp_path))
+    # second cut: JUST the [vfilt] instance -> its outlet crosses to `gain`, so
+    # the boundary outlet type comes from the abstraction, not a `~` name.
+    vfilt = next(n for n in p.pd.nodes if node_text(n) == "vfilt")
+    extract(p, [vfilt], "vstage", str(tmp_path))
+
+    after_path = tmp_path / "after.pd"; p.save(after_path)
+    after = analyze(_render_full(after_path).audio)
+    assert compare(after, before).similarity == pytest.approx(1.0, abs=1e-6), (
+        "nested extraction changed the sound -- the abstraction outlet likely "
+        "typed as control")
+
+    # the nested abstraction's boundary port is a SIGNAL outlet, and it holds
+    # the [vfilt] instance (nesting, not a re-typed copy)
+    vstage = (tmp_path / "vstage.pd").read_text(encoding="utf-8")
+    assert "outlet~;" in vstage and "outlet;" not in vstage
+    assert "vfilt" in vstage
+
+
+def test_extract_after_reload_resolves_abstraction_ports(tmp_path):
+    """Patch.load records source_dir, so a reloaded patch's abstraction outlets
+    resolve without the caller passing search_dirs. All abstractions live next
+    to the parent so Pd resolves them as siblings."""
+    p = Patch(600, 400, 10)
+    osc = p.obj("osc~ 330"); filt = p.obj("bp~ 1200 4")
+    gain = p.obj("*~ 0.4"); dac = p.obj("dac~")
+    p.chain(osc, filt, gain); p.link(gain, 0, dac, 0); p.link(gain, 0, dac, 1)
+    p.save(tmp_path / "flat.pd")
+    before = analyze(_render_full(tmp_path / "flat.pd").audio)
+    extract(p, [filt], "eng", str(tmp_path))
+    p.save(tmp_path / "parent.pd")
+
+    # reload from disk (source_dir set automatically) and extract JUST [eng],
+    # WITHOUT passing search_dirs -- source_dir must carry the resolution.
+    reloaded = Patch.load(tmp_path / "parent.pd")
+    assert reloaded.source_dir is not None
+    eng = next(n for n in reloaded.pd.nodes if node_text(n) == "eng")
+    extract(reloaded, [eng], "engstage", str(tmp_path))
+    reloaded.save(tmp_path / "after.pd")
+
+    after = analyze(_render_full(tmp_path / "after.pd").audio)
+    assert compare(after, before).similarity == pytest.approx(1.0, abs=1e-6)
+    stage = (tmp_path / "engstage.pd").read_text(encoding="utf-8")
+    assert "outlet~;" in stage and "outlet;" not in stage
