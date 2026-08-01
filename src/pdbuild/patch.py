@@ -158,6 +158,18 @@ class Patch:
             self.x += self.column
         return px, py
 
+    # -- unique names ------------------------------------------------------
+    def uid(self, prefix: str = "u") -> str:
+        """A patch-unique name, e.g. for a module's delay-line buffer.
+
+        Deterministic within a build (same construction order -> same names),
+        so two delays in one patch never share a buffer, and re-running the
+        build is reproducible. extract() namespaces these to ``$0-`` if the
+        module later moves into an abstraction, so instances stay independent.
+        """
+        self._uid_n = getattr(self, "_uid_n", 0) + 1
+        return f"{prefix}{self._uid_n}"
+
     # -- boxes -------------------------------------------------------------
     def obj(self, text: str, x: int | None = None, y: int | None = None):
         """An object box, with inlet/outlet counts declared where we know them
