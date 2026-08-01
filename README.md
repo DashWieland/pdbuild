@@ -238,25 +238,32 @@ wide  = delay(p, dirty, time_ms=180, feedback=0.35)
 dac = p.obj("dac~"); p.link(wide, 0, dac, 0); p.link(wide, 0, dac, 1)
 ```
 
-The first tier is the general-purpose **signal processors**:
+| Tier | Category | Modules |
+|---|---|---|
+| **signal processors** | envelopes | `ad_envelope`, `asr_envelope` |
+| | control | `glide`, `smooth` |
+| | filters | `lowpass`, `highpass`, `bandpass`, `resonant_lowpass` |
+| | effects | `saturate`, `delay`, `chorus` |
+| **synth voices** | pitched | `oscillator`, `subtractive_voice`, `acid_voice`, `fm_voice` |
+| | drums | `kick`, `snare`, `hat` |
 
-| Category | Modules |
-|---|---|
-| envelopes | `ad_envelope`, `asr_envelope` |
-| control | `glide`, `smooth` |
-| filters | `lowpass`, `highpass`, `bandpass`, `resonant_lowpass` |
-| effects | `saturate`, `delay`, `chorus` |
+**Voices generate; processors transform.** A signal processor takes a signal and
+returns a signal; a voice takes a *control* trigger and a pitch and returns
+audio, built by composing processors (oscillator → filter → envelope → drive).
+Pitch is a constant Hz or a control port, so a sequencer drives it — see
+[integration/build_voice_demo.py](../integration/build_voice_demo.py) for an
+8-step acid line + drums assembled from these.
 
 **"Verified" is the point.** Every module's claim is backed by a rendered
 measurement, not by reading the patch — a lowpass drops the centroid, saturation
-grows odd harmonics on a sine, a delay leaves a tail after the input stops. A
-port is a node (its outlet 0) or a `(node, outlet)` pair, so a module can be fed
-from any outlet. Allocating modules (delay, chorus) take a `Patch.uid()` buffer
-name, so two never collide.
+grows odd harmonics on a sine, a subtractive voice plays the note it was asked
+for, a kick reads low and punchy. A port is a node (its outlet 0) or a
+`(node, outlet)` pair. Allocating modules (delay, chorus) take a `Patch.uid()`
+buffer name, so two never collide.
 
-Synth voices and input/control surfaces are separate tiers (input devices are
-the hard one — interaction, not sound, so a headless render can't fully verify
-them). See [../ROADMAP.md](../ROADMAP.md).
+The remaining tier is **input / control surfaces** (X-Y pad, sliders) — the hard
+one, because they're interaction not sound, so a headless render can't fully
+verify them. See [../ROADMAP.md](../ROADMAP.md).
 
 ## `PdPatch` — the legacy emitter
 
