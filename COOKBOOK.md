@@ -1,0 +1,283 @@
+# Pd patch-generation cookbook
+
+Field notes for generating Pure Data patches programmatically. Everything here
+came out of real builds — a step sequencer, an outrun-style 303 acid synth, and a
+four-file performance rig — and **every gotcha listed cost real debugging time.**
+
+The recurring theme: Pd is a *live* environment being asked to behave like a
+*compiled* one. Most bugs are not DSP bugs; they're **initialization and
+ordering** bugs. Read §2 before writing anything.
+
+> **See also:** the `pure-data` skill (`~/.claude/skills/pure-data/`) carries the
+> same hard-won semantics as general working guidance, with deeper reference
+> files on the file format, object I/O, and headless verification. This cookbook
+> is the *pdbuild-flavoured* view: how these facts shape the code you write with
+> the builder. They agree; if they ever diverge, trust a fresh render.
+
+---
+
+## 1. The `.pd` file format
+
+A patch is a flat list of `;`-terminated records.
+
+```
+#N canvas 20 20 1240 840 10;      <- the window (x, y, w, h, font)
+#X obj 30 40 osc~ 440;            <- object box
+#X msg 30 70 1 3 \, 0 210 3;      <- message box
+#X text 30 100 a comment;         <- comment
+#X floatatom 30 130 8 0 0 0 - - xpad 0;
+#X connect 0 0 1 0;               <- src_index outlet -> dst_index inlet
+```
+
+Other records you'll meet: `#X restore` (closes a subpatch), `#X coords`
+(graph-on-parent), `#X array` + `#A` (array and its data), `#X declare`
+(search paths / libraries).
+
+### The index rule — the one that breaks everything
+
+`#X connect` refers to boxes by their **creation index**: the order they appear
+in the file, starting at 0. **Every `#X` box element takes an index** — objects,
+messages, comments, floatatoms, GUI objects. Comments included.
+
+> Add one comment in the middle of a patch and every connection after it points
+> at the wrong object.
+
+This is precisely why pdbuild hands you an index from every box method and never
+asks you to compute one. If you write `.pd` by hand, this is what will get you.
+
+### Escaping
+
+Inside a message box **or a comment**, `,` and `;` are message separators and
+must be written `\,` and `\;`.
+
+```
+#X msg 30 70 1 3 \, 0 210 3;      # ONE message box holding two messages
+#X msg 30 90 \; pd dsp 1;         # sends "dsp 1" to the receiver named "pd"
+```
+
+An unescaped comma in a *comment* silently splits it, and Pd tries to evaluate
+the tail:
+
+```
+#X text 20 10 acid303 - engine (edit here, play from acid_set.pd);
+  -> error: canvas: no method for 'play'
+```
+
+That error message is very hard to trace back to a comment. pdbuild escapes both
+characters for you in `msg()` and `comment()`.
+
+### Dollar signs
+
+Load-time expansion only triggers on `$` followed by a **digit** (`$0`, `$1`…).
+So `expr~`/`expr` variables written `$v1`, `$f1`, `$i1` pass through untouched
+and are safe to emit literally:
+
+```python
+p.obj("expr~ tanh($v1)")     # verified: loads and runs
+p.obj("expr 15000/$f1")      # BPM -> 16th-note ms
+```
+
+In an **abstraction**, `$1..$n` are creation arguments and `$0` is a unique
+per-instance id — use `$0-name` for instance-local send/receive/array names so
+two copies don't collide.
+
+---
+
+## 2. Semantics that will bite you
+
+### 2a. GUI controls emit **nothing** at load — the silent-patch trap
+
+This one bit us **twice in a single build**, both times producing a completely
+silent patch with no errors:
+
+- Mute toggles fed gain chains ending in `[line~]`. A toggle that's never clicked
+  outputs nothing, `line~` sat at **0**, and every channel was multiplied to
+  silence.
+- A drum-pattern radio fed `[== n] -> [spigot]` gates. The radio never emitted, so
+  every spigot stayed **closed** and the drums never fired.
+
+**Rule: anything downstream of a GUI control must be initialized explicitly.**
+pdbuild has a helper for exactly this — use it and the trap disappears:
+
+```python
+p.init_all({mute_a: 0, mute_b: 0, pattern_radio: 0, master: 0.65})
+```
+
+which wires `[loadbang] → [value( → widget` (one shared loadbang). Sending a
+float to an IEM widget both sets its visual state and makes it output — which is
+what you want. Two integration tests in `tests/` pin this: one asserts the
+un-initialized version really does render silent, the other that `init()` fixes
+it.
+
+Sending a float to an IEM widget both sets its visual state and makes it output —
+which is what you want. (IEM widgets have an "init" flag that does this too, but
+driving them from `loadbang` is explicit and easy to audit.)
+
+Same class of bug, other flavours:
+
+| Object | Trap |
+|---|---|
+| `[line~]`, `[vline~]` | start at **0** — silence until something sends a target |
+| `[spigot]` | defaults **closed** |
+| `[f ]` | outputs **only when banged**; a value in its cold inlet is invisible until then. Prime it with `loadbang` if downstream math depends on it |
+| `[metro]` | start it with a nonzero float (`1`), not a bang |
+| cold inlets generally | hold a value but never fire — set them *before* the hot inlet arrives |
+
+### 2b. You cannot shadow a built-in class
+
+Putting `dac~.pd` on the search path does **not** intercept `[dac~]` — Pd
+resolves the registered built-in and never looks at the path. The render comes
+out silent with no error. (Same for `[notein]`.)
+
+If you need to intercept a built-in, **rewrite the class token** to a
+differently-named abstraction (this is exactly how pdverify captures audio:
+`dac~` → `pdverify_sink~`). Rewriting only the class field touches no indices and
+no `#X connect` lines.
+
+### 2c. Execution order — right to left, and it matters
+
+- `[trigger]`/`[t]` fires its outlets **right to left**.
+- `[unpack]` does too: the **highest-numbered outlet fires first**, outlet 0 last.
+- **Fan-out from a single outlet to several destinations is UNDEFINED order.**
+  If order matters, force it with `[t]`.
+
+This drives real design decisions. In a step sequencer each step must set the
+pitch *before* the envelope triggers, and the glide time *before* the pitch. With
+`[unpack]` firing right-to-left, that dictates the column order of your data:
+
+```
+message per step:  "gate accent pitch slide"
+unpack outlets:      0     1      2     3
+fires:                                  ^ slide  (sets glide time)
+                                  ^ pitch (into pack -> line~)
+                          ^ accent
+                     ^ gate   (LAST: triggers the envelope, pitch already set)
+```
+
+Get this backwards and every note starts on the *previous* pitch.
+
+### 2d. Abstractions
+
+- Outlet/inlet **order is by x-position** of the `[outlet]`/`[inlet]` objects, not
+  creation order. Place them left-to-right deliberately.
+- An abstraction is found if its `.pd` sits in the parent patch's directory (or
+  on the search path). pdverify's renderer adds the patch's own directory to
+  `-path`, so sibling abstractions resolve during headless verification.
+- `loadbang` inside an abstraction fires when the abstraction loads.
+
+---
+
+## 3. Vanilla building blocks (verified working headless)
+
+All confirmed to load and render under `pd -nogui -batch -noaudio` on 0.56.
+
+| Object | Use | Notes |
+|---|---|---|
+| `osc~` / `phasor~` | sine / ramp | freq inlet accepts a **signal** (drive it from `line~` for glide) |
+| `phasor~` → `-~ 0.5` | sawtooth | centre it or you feed the filter DC |
+| `bob~` | Moog-ladder **resonant** lowpass | in / **cutoff (signal)** / **resonance (signal)**. >4 self-oscillates; keep ≲3.6. `oversample 3` message for stability at high cutoff+Q. The acid filter. |
+| `lop~` / `hip~` / `bp~` | 1-pole LP / HP / bandpass | `lop~` cutoff is **control-rate only** — to LFO it, sample the LFO with `[snapshot~]` on a `[metro]` |
+| `vline~` | sample-accurate envelopes | `"1 3, 0 210 3"` = ramp to 1 over 3 ms, then from 3 ms ramp to 0 over 210 ms. The AD workhorse |
+| `line~` | control→signal ramps | `"target time"`; also the portamento/glide engine |
+| `expr~ tanh($v1)` | soft saturation | drive into it with `*~` for "meat" |
+| `clip~ -1 1` | safety limiter | put one before `dac~`, always |
+| `delwrite~` / `delread~` / `vd~` | delay | `vd~`'s delay time is a **signal** → LFO it for chorus. `delread~` is a fixed tap |
+| `rev3~` | reverb | **2-in / 4-out**; args = level, liveness(%), crossover(Hz), damping(%) |
+| `noise~` | drums/texture | + `bp~` = snare, + `hip~ 7000` = hat |
+| `mtof` | MIDI → Hz | |
+| `else/pad` (ELSE) | X-Y control surface | outlet emits `list x y` **and** `click` → split with `[route list click]`; coords range = the creation-arg `dim` |
+
+**Drum voices, cheaply:** kick = `vline~` pitch sweep (110→45 Hz) into `osc~`,
+times an amp `vline~`, into `tanh` for punch. Snare = `noise~` → `bp~ 1900 3` ×
+short env. Hat = `noise~` → `hip~ 7000` × very short env.
+
+---
+
+## 4. Patterns that work
+
+### Broadcast clock
+One master `[metro]` → counter → `[mod 16]` → `[s xstep]`. Every module does
+`[r xstep]` and sequences itself. Everything stays locked, and modules stay
+independent.
+
+### Surface / engine split
+Put each engine in its own abstraction exposing only `[outlet~]`. The top-level
+patch holds **only** what a human touches (pad, toggles, radio, sliders) plus a
+mixer. This is what turns a wall of 140 objects into a playable instrument.
+
+### Route control through named sends/receives — not direct wires
+Surface control → `[s cutoff]`; engine → `[r cutoff]`. Costs nothing and buys:
+
+- the same parameter is drivable by **GUI, message, or automation**;
+- **headless testability** — pdverify can `control.send("drumpat", 2)` to drive a
+  rig that has no mouse. Mutes wired this way let you render each module alone.
+
+If a parameter is worth exposing, expose it as a receive.
+
+### Smoothed control signals (no zipper noise)
+```python
+r  = p.obj("r cutoff")        # 0..1
+m  = p.obj("* 1200"); a = p.obj("+ 200")
+pk = p.obj("pack f 25")       # ramp over 25 ms
+ln = p.obj("line~")           # -> a smooth signal
+```
+
+### Step data as per-step messages
+`[sel 0 1 ... 15]` → one message box per step holding that step's parameters →
+`[unpack f f f f]`. Compact, no arrays needed, and the whole pattern is visible
+in the file. Choose the column order to satisfy §2c.
+
+### Switchable patterns without arrays
+`[r pattern]` → `[== n]` → `[spigot]` per pattern; gate the step through the
+spigot into that pattern's `[sel ...]` chains. Remember to **initialize the
+selector** (§2a) or every spigot stays shut.
+
+### Always
+- `clip~ -1 1` before `dac~`.
+- `hip~ ~25` to kill DC/subsonic — an un-driven `osc~` sits at 0 Hz, which is a
+  DC offset, not silence.
+- Keep feedback gains < ~0.6 and clip inside the loop.
+
+---
+
+## 5. Build → verify loop (how to build what you can't hear)
+
+pdverify is what makes blind construction viable. The techniques that paid off:
+
+1. **Gates first.** `silent / clipped / nan-inf` catch nearly every structural
+   bug instantly. A silent render almost always means §2a, not DSP.
+2. **Read the Pd console.** `render()` surfaces it. Load errors like
+   `couldn't create` or `canvas: no method for 'play'` point at missing
+   externals or a comment-escaping bug.
+3. **Isolate modules.** Wire mutes as receives, then render with all-but-one
+   muted and compare peak levels. This is how we found the drums were never
+   firing (they measured −20 dBFS of *mute-ramp bleed*, not drums).
+4. **Sweep the parameter space.** Render a grid across a control surface and
+   print peak/centroid per cell. A 5×5 sweep proved a reported "dead spot in the
+   middle of the X-Y pad" was **not** in the synth (every cell was audible) —
+   which correctly redirected the hunt to the pad's coordinate reporting.
+5. **Pick the right measurement for the question.** A timbre *fingerprint* is
+   time-averaged and **cannot detect note-order changes** — comparing two
+   generative melodies with `compare()` gave a meaningless 0.97. Compare
+   `top_partials` (pitch content) instead. Measure what you actually claim.
+6. **Balance by numbers.** Render each part alone, read peak dBFS, and set gains
+   from that instead of guessing.
+
+### What verification can't do
+It confirms *health* (silent/clip/NaN), *tuning*, and *gross character*
+(bass-heavy, resonant, dynamic, evolving). It cannot judge whether something
+**sounds good**. Taste still needs ears — build the loop so a human can be handed
+a `.wav` quickly.
+
+---
+
+## 6. Layout
+
+Function doesn't care about coordinates; humans do.
+
+- Reserve a **GUI zone** at the top, place controls explicitly, then move the
+  auto-layout cursor *below* it (`p.cursor(20, 320)`), or the generated guts land
+  on top of your pad. (This happened — the X-Y pad ended up buried.)
+- Auto-flowed columns are fine for engine internals nobody reads. The real
+  answer for human-readable patches is §4's surface/engine split: hide the guts
+  in an abstraction so nobody has to read them.

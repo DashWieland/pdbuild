@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pdbuild"
+version = "0.4.0"
+description = "Pure Data patch authoring for instruments — Pd idioms over py2pd."
+readme = "README.md"
+requires-python = ">=3.13"   # py2pd requires 3.13+
+license = "MIT"
+authors = [{ name = "Dash Wieland" }]
+keywords = ["puredata", "pure-data", "pd", "audio", "dsp", "codegen", "metaprogramming"]
+dependencies = ["py2pd>=0.1.3"]   # the construction backend
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
