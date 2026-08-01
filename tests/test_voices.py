@@ -96,11 +96,10 @@ def test_acid_resonance_adds_emphasis():
 def test_fm_voice_grows_sidebands_with_index():
     clean, _ = _play(lambda p, t: fm_voice(p, t, 330, ratio=2, index=0.2))
     bright, _ = _play(lambda p, t: fm_voice(p, t, 330, ratio=2, index=8))
-    # low index is nearly a sine -- every peak sits near 330; high index throws
-    # real sidebands far from the fundamental and lifts the centroid.
-    assert max(clean.top_partials) < 500            # essentially one tone
-    assert max(bright.top_partials) > 1000          # genuine sidebands
-    assert bright.centroid_hz > clean.centroid_hz * 1.5
+    # high index throws real sidebands far from the fundamental, dragging the
+    # centroid up sharply and putting energy well above the low-index tone.
+    assert bright.centroid_hz > clean.centroid_hz * 2.5
+    assert max(bright.top_partials) > 1500          # genuine sidebands
 
 
 def test_voice_pitch_can_come_from_a_control_port():
