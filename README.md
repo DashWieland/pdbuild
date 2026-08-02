@@ -36,9 +36,16 @@ pdbuild.Patch    Pd idioms      cursor layout, init(), object I/O table
 ## Install & test
 
 ```console
-$ pip install -e ./pdbuild
-$ python -m pytest pdbuild/tests -q    # 50 tests, <1s
+$ pip install -e .
+$ python -m pytest tests -q
 ```
+
+> **Note on the py2pd dependency.** pdbuild uses py2pd features
+> (`Patcher(width=…)`, `add_comment`, a lossless `to_builder`, the floatatom
+> field-order fix) that live on a local branch and are **not yet in the published
+> py2pd 0.1.3**. Until those land upstream (they're staged as PRs), install py2pd
+> from that branch rather than PyPI, or several `pdbuild.Patch` methods will fail.
+> The render-verified tests need Pd on `PATH` and [pdverify](https://github.com/DashWieland/pdverify); they skip cleanly without it.
 
 The suite asserts against **rendered `.pd` text**, because emitting correct text
 is the whole job. Several tests are labelled `REGRESSION` — they pin bugs that
