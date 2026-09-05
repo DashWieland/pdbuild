@@ -60,11 +60,29 @@ OBJECT_IO: dict[str, tuple[int, int]] = {
     "inlet~": (0, 1),
     "outlet": (1, 0),
     "inlet": (0, 1),
+    # IEM GUIs (py2pd leaves these unknown, so a mis-wired control went unchecked)
+    "hsl": (1, 1),
+    "vsl": (1, 1),
+    "hradio": (1, 1),
+    "vradio": (1, 1),
+    "tgl": (1, 1),
+    "bng": (1, 1),
+    "nbx": (1, 1),
     # else
     "else/pad": (1, 2),    # list x y, click
 }
 
 _EXPR_VAR = re.compile(r"\$[fvs](\d+)")
+
+# The escapes py2pd's own escape() adds: `\,` `\;` and `\$<digit>`. Stripping
+# them first makes obj()/msg()/comment() idempotent -- text a caller already
+# escaped is not escaped again into `\\\$1` (which Pd reads as a literal
+# backslash and a dollar-arg, i.e. garbage).
+_OUR_ESCAPES = re.compile(r"\\([,;])|\\(\$)(?=\d)")
+
+
+def _normalize_escapes(text: str) -> str:
+    return _OUR_ESCAPES.sub(lambda m: m.group(1) or m.group(2), text)
 
 
 def object_io(text: str) -> tuple[int, int] | None:
@@ -173,8 +191,15 @@ class Patch:
     # -- boxes -------------------------------------------------------------
     def obj(self, text: str, x: int | None = None, y: int | None = None):
         """An object box, with inlet/outlet counts declared where we know them
-        so py2pd's connection validation actually fires."""
+        so py2pd's connection validation actually fires.
+
+        Creation-arg dollars (``$1``, ``$0-name``) are written ``\\$1`` in the
+        file, as Pd requires, and a comma in ``expr if(a, b, c)`` is written
+        ``\\,``. Text you already escaped is normalised first, so it is never
+        escaped twice. ``$v1``/``$f1`` (expr variables) pass through.
+        """
         px, py = self._place(x, y)
+        text = _normalize_escapes(text)
         io = object_io(text)
         kw: dict[str, Any] = {}
         if io is not None:
@@ -184,15 +209,17 @@ class Patch:
     def msg(self, text: str, x: int | None = None, y: int | None = None):
         """A message box. ',' and ';' are escaped for you, so
         ``msg("1 3, 0 210 3")`` is a vline~ envelope and ``msg("; pd dsp 1")``
-        sends to a named receiver."""
+        sends to a named receiver; ``$1`` is written ``\\$1``. Idempotent:
+        already-escaped text is not escaped again."""
         px, py = self._place(x, y)
-        return self.pd.add_msg(text, x_pos=px, y_pos=py)
+        return self.pd.add_msg(_normalize_escapes(text), x_pos=px, y_pos=py)
 
     def comment(self, text: str, x: int | None = None, y: int | None = None):
         """A comment. It takes an index in Pd's connection numbering like any
-        other box, and its ',' / ';' are escaped."""
+        other box, and its ',' / ';' / ``$1`` are escaped (a bare dollar in a
+        comment is evaluated at load and errors too). Idempotent."""
         px, py = self._place(x, y)
-        return self.pd.add_comment(text, x_pos=px, y_pos=py)
+        return self.pd.add_comment(_normalize_escapes(text), x_pos=px, y_pos=py)
 
     def floatatom(self, x: int | None = None, y: int | None = None, *,
                   send: str = "-", receive: str = "-", width: int = 5):

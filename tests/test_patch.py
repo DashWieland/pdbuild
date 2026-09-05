@@ -74,6 +74,47 @@ def test_expr_dollar_args_survive():
     assert "15000/$f1" in text
 
 
+def test_creation_arg_dollars_are_escaped_exactly_once():
+    """REGRESSION (lila_rig): `$2` must be `\\$2` in the file. py2pd escapes it
+    -- but it also doubled an already-escaped `\\$2` into `\\\\$2`, which Pd
+    reads as a literal backslash plus a dollar-arg. Both spellings now land
+    on the same, correct bytes."""
+    p = Patch()
+    p.obj("lop~ $2")
+    p.obj("lop~ \\$2")
+    p.obj("delwrite~ $0-ks 300")
+    lines = [l for l in p.render().splitlines() if l.startswith("#X obj")]
+    assert lines[0].endswith("lop~ \\$2;")
+    assert lines[1].endswith("lop~ \\$2;")
+    assert lines[2].endswith("delwrite~ \\$0-ks 300;")
+    assert "\\\\" not in p.render()
+
+
+def test_msg_and_comment_escaping_is_idempotent():
+    p = Patch()
+    p.msg("\\$1, \\$2 \\$3")
+    p.msg("$1, $2 $3")
+    p.comment("a\\, b\\; c", 10, 10)
+    text = p.render()
+    msgs = [l for l in text.splitlines() if l.startswith("#X msg")]
+    assert msgs[0].split(" ", 4)[4] == msgs[1].split(" ", 4)[4]     # same bytes either way
+    assert "\\$1" in msgs[0] and "\\\\" not in text
+    assert "\\ \\," not in text                                       # the double-escape garble
+
+
+def test_iem_gui_arity_is_declared():
+    """IEM GUIs were unknown to py2pd, so a control wired to a bogus inlet
+    sailed through validation."""
+    from py2pd import PdConnectionError
+    p = Patch()
+    sl = p.obj("hsl 150 16 0 1 0 0 empty tempo_ui empty -2 -8 0 10 #fcfcfc #000000 #000000 0 1", 20, 20)
+    tg = p.obj("tgl 20 0 empty run_ui empty 0 -8 0 10 #fcfcfc #cc4400 #000000 0 1", 20, 60)
+    assert sl.num_inlets == 1 and tg.num_outlets == 1
+    assert p.unvalidated() == []
+    with pytest.raises(PdConnectionError):
+        p.link(sl, 0, tg, 3)
+
+
 # --------------------------------------------------------------------------- #
 # init() — GUI controls emit nothing at load
 # --------------------------------------------------------------------------- #
