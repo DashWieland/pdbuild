@@ -14,6 +14,7 @@ Pd-generation field notes.
 
 from __future__ import annotations
 
+from . import preview, surface
 from .extract import (
     between,
     crossing_edges,
@@ -30,4 +31,5 @@ __all__ = [
     "Patch", "PdPatch", "OBJECT_IO", "object_io",
     "between", "downstream", "upstream", "crossing_edges",
     "extract", "extraction_plan",
+    "surface", "preview",
 ]
