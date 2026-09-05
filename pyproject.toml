@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pdbuild"
-version = "0.7.0"
+version = "0.8.0"
 description = "Pure Data patch authoring for instruments — Pd idioms over py2pd."
 readme = "README.md"
 requires-python = ">=3.13"   # py2pd requires 3.13+
@@ -15,6 +15,7 @@ dependencies = ["py2pd>=0.1.3"]   # the construction backend
 
 [project.optional-dependencies]
 dev = ["pytest>=7"]
+preview = ["matplotlib>=3.5"]   # pdbuild.preview.layout_png
 
 [tool.setuptools.packages.find]
 where = ["src"]

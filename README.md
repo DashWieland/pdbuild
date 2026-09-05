@@ -36,9 +36,11 @@ pdbuild.Patch    Pd idioms      cursor layout, init(), object I/O table
 ## Install & test
 
 ```console
-$ pip install -e .
+$ pip install -e .            # add [preview] for pdbuild.preview.layout_png (matplotlib)
 $ python -m pytest tests -q
 ```
+
+Changes: [CHANGELOG.md](CHANGELOG.md).
 
 > **Note on the py2pd dependency.** pdbuild uses py2pd features
 > (`Patcher(width=…)`, `add_comment`, a lossless `to_builder`, the floatatom
@@ -82,9 +84,9 @@ already does well (GUI constructors, arrays, subpatches, SVG, round-tripping).
 | Method | What it does |
 |---|---|
 | `Patch(w, h, font, x=, y=)` | New canvas, with real geometry. |
-| `obj(text, x=None, y=None)` | Object box, with inlet/outlet counts declared where we know them so validation fires. |
-| `msg(text, x=None, y=None)` | Message box. `,` and `;` escaped for you. |
-| `comment(text, x, y)` | Comment. **Takes a connection index** like any box. |
+| `obj(text, x=None, y=None)` | Object box, with inlet/outlet counts declared where we know them so validation fires. `$1` is written `\$1`, a comma in `expr if(a, b, c)` as `\,`; idempotent (already-escaped text is left alone). |
+| `msg(text, x=None, y=None)` | Message box. `,` `;` and `$1` escaped for you, idempotently. |
+| `comment(text, x, y)` | Comment. **Takes a connection index** like any box; escaped like a message. |
 | `floatatom(x, y, send=, receive=, width=)` | Number box. `send` and `receive` are **distinct slots**. |
 | `abstraction(name, inlets=, outlets=)` | An instance of a sibling `<name>.pd`. |
 | `link(src, outlet, sink, inlet)` | Wire two boxes, reading left to right. |
@@ -253,31 +255,104 @@ dac = p.obj("dac~"); p.link(wide, 0, dac, 0); p.link(wide, 0, dac, 1)
 | | effects | `saturate`, `delay`, `chorus` |
 | **synth voices** | pitched | `oscillator`, `subtractive_voice`, `acid_voice`, `fm_voice` |
 | | drums | `kick`, `snare`, `hat` |
+| **control tier** | clock | `swing_clock` — one `[metro]` retimed per pulse (swing inside each beat group); broadcasts `pulse`, `pulsepos`, `bar`, `halfpulse`, `pulsems`; `reset` receive; tempo-factor input |
+| | patterns | `step_tables` — per-pulse tables, one message per preset, the intensity-tier gate (`0 < level ≤ INTENSITY`), preset change restarts the bar; `gated_value` |
+| | melody | `melody_loop` — a Turing-machine loop: phrase bank → table, DENSITY priority mask, per-pass MUTATE from a scale-aware generator, rests release, accents by rank, bar-aligned on reset |
+| | scales | `euclid` / `euclid_rows`, `scale_tables`, `scale_degree` (degree → fractional MIDI: scale table + tonic + neutral offset — maqam quarter tones) |
 
-**Voices generate; processors transform.** A signal processor takes a signal and
-returns a signal; a voice takes a *control* trigger and a pitch and returns
-audio, built by composing processors (oscillator → filter → envelope → drive).
-Pitch is a constant Hz or a control port, so a sequencer drives it — see
+**Voices generate; processors transform; the control tier makes the
+triggers.** A signal processor takes a signal and returns a signal; a voice
+takes a *control* trigger and a pitch and returns audio, built by composing
+processors (oscillator → filter → envelope → drive). The control tier reads
+control receives (`tempo`, `swing`, `pattern`, `density`…) and broadcasts named
+sends (`pulse`, `bar`, `note_in`…) that voices and each other listen to — the
+broadcast-clock idiom of the cookbook, so every part stays independent and
+everything stays locked. Pitch is a constant Hz or a control port, so a
+sequencer drives it — see
 [integration/build_voice_demo.py](../integration/build_voice_demo.py) for an
 8-step acid line + drums assembled from these.
+
+```python
+from pdbuild.modules import swing_clock, step_tables, melody_loop, kick, subtractive_voice
+
+clock = swing_clock(p, groups=(3, 3, 3, 3))           # 12/8; reads [r tempo] [r swing] [r run]
+tabs  = step_tables(p, [{"d": [1,0,0,2,0,0,1,0,0,3,0,0]}], pulse_recv=clock.pulse, reset_send=clock.reset)
+drum  = kick(p, tabs.hits["d"])                       # plays when 0 < level <= [r intensity]
+loop  = melody_loop(p, phrases=["0 . 0 2 . 3 4 . 3 2 . 1  0 . 0 3 . 4 3 . 2 0 . ."],
+                    pulse_recv=clock.pulse, bar_recv=clock.bar, reset_recv=clock.reset)
+# [r note_in] -> "degree velocity"; feed scale_degree -> mtof -> a voice
+```
 
 **"Verified" is the point.** Every module's claim is backed by a rendered
 measurement, not by reading the patch — a lowpass drops the centroid, saturation
 grows odd harmonics on a sine, a subtractive voice plays the note it was asked
-for, a kick reads low and punchy. A port is a node (its outlet 0) or a
-`(node, outlet)` pair. Allocating modules (delay, chorus) take a `Patch.uid()`
-buffer name, so two never collide.
+for, a kick reads low and punchy, the swung clock reads uneven intervals with
+the same mean, the locked loop repeats beat for beat (pdverify's
+`loop_similarity`) and the mutating one diverges. A port is a node (its
+outlet 0) or a `(node, outlet)` pair. Allocating modules (delay, chorus) take a
+`Patch.uid()` buffer name, so two never collide.
 
-The remaining tier is **input / control surfaces** (X-Y pad, sliders) — the hard
-one, because they're interaction not sound, so a headless render can't fully
-verify them. See [../ROADMAP.md](../ROADMAP.md).
+## Control surfaces — `pdbuild.surface`
+
+The input tier. The idiom, now the standard for every control:
+
+> **The engine reads `[r name]`. The widget emits `[s name]` from its outlet
+> and listens on `name_ui` (its receive symbol).** Anything — the GUI itself, a
+> hardware CC, a pad, a test script — sets a control by sending to `name_ui`;
+> the widget updates on the panel *and* re-emits to `name`. One source of truth,
+> and every control is injection-testable: `control.send("tempo_ui", 180)` in
+> pdverify drives the rig exactly the way a hand on the panel does.
+
+```python
+from pdbuild.surface import Control, column, display, pad_row, Pad, cc_map, note_split
+
+column(p, 20, 50, [
+    Control("run", "tgl", default=1, label="RUN"),
+    Control("tempo", "hsl", default=168, lo=100, hi=220, label="TEMPO (BPM)"),
+    Control("pattern", "hradio", default=0, n=4, label="PATTERN"),
+])                                              # widget + [s name] + loadbang init + label, stacked
+display(p, "lastmidi", 20, 300)                 # a number box that SHOWS [s lastmidi]
+pad_row(p, 20, 340, [Pad("stutter", "momentary"), Pad("pattern", "cycle", n=4), Pad("drone", "toggle")])
+cc_map(p, [(74, "tempo", 100, 220), (71, "swing", 0, 0.45)], x=600, y=40)   # + [r fakecc] twin, LAST CC
+note_split(p, pad_channel=10, x=600, y=300)     # [notein] -> midi_in / pad_in, deterministic
+```
+
+| Function | What it does |
+|---|---|
+| `control(patch, name, kind, x=, y=, default=, label=, lo=, hi=, n=)` | One control: IEM widget (`hsl vsl hradio vradio tgl bng nbx`) with receive `<name>_ui`, `[s name]`, the loadbang init message, a label. |
+| `column(patch, x, y, [Control…])` | A stacked column; plumbing to the right so the panel is only things to touch. |
+| `display(patch, name, x, y, send=None)` | A number box showing `[s name]` — the receive slot right on **both** builders; `send=` for the runtime probe. |
+| `pad_row(patch, x, y, [Pad…])` | Momentary / toggle / cycle pads; flip and cycle read the control's *current* value. Each handle's `trigger` is the receive a MIDI pad bangs. |
+| `cc_map(patch, [(cc, name, lo, hi)…], x=, y=)` | `[ctlin]` router onto `<name>_ui`, a `[r fakecc]` twin, LAST-CC sends. |
+| `note_split(patch, pad_channel=10, x=, y=)` | `[notein]` repacked then unpacked: channel gates set before the note passes. |
+
+Every function works on `Patch` and on the frozen `PdPatch`. What a headless
+render *can* verify here is verified: the init value reaches the engine,
+setting `<name>_ui` by injection moves it, a CC lands on the widget, notes
+split by channel, and a `display()` really re-emits what it shows (the
+runtime probe — put a name in its send slot and print it).
+
+## Layout preview — `pdbuild.preview`
+
+An agent never sees the canvas. `boxes(patch_or_text_or_path)` returns every
+box with its canvas rectangle — widgets at Pd's real sizes (an `hsl` is its
+length × 16, an `hradio` is cells × size) — `overlaps()` lists buried
+controls, and `layout_png(patch, "panel.png", xmax=740)` draws the GUI zone
+with matplotlib (`pip install -e .[preview]`).
 
 ## `PdPatch` — the legacy emitter
 
 The original standalone builder, kept working and tested because `instruments/`
 was built with it and those builds should stay reproducible. **Frozen** — new
 work uses `Patch`. It carries a known floatatom send/receive defect, documented
-in place rather than fixed, so the old instruments still regenerate byte-identically.
+in place rather than fixed, so the old instruments still regenerate
+byte-identically; `surface.display()` gets a correct read-out box on top of it.
+
+One change since freezing (0.8.0): its escaping is now complete and idempotent
+— `obj()` writes `$1` as `\$1` and a bare comma as `\,`, `msg()`/`comment()`
+escape `$1` too, and nothing already escaped is escaped twice. Proven
+byte-identical on all 16 committed instrument files; the only bytes that change
+are ones that were broken (a bare `$1` in a file loads as `0`).
 
 ## The workflow this is built for
 

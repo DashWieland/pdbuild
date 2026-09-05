@@ -66,7 +66,31 @@ the tail:
 That error message is very hard to trace back to a comment. pdbuild escapes both
 characters for you in `msg()` and `comment()`.
 
+A comma inside an **object box** is the same story: `expr if($f1>0, $f1, $f2)`
+must be written `expr if($f1>0\, $f1\, $f2)` in the file or the comma splits
+the object's arguments. `obj()` escapes it for you (0.8.0) on both builders.
+
 ### Dollar signs
+
+**In a `.pd` file, every dollar-arg is written escaped: `\$1`, `\$0-name`.**
+This is how Pd itself saves them, and it is not optional. An unescaped `$1` in
+a file is evaluated *while the file is being read*, against nothing: the box
+is built with `0` in its place and the console says `$1: argument number out
+of range`. The symptom is an abstraction whose `[lop~ $2]` / `[*~ $3]` all
+came out as `0` — silence, with no other error. (This zeroed every argument
+of a Karplus-Strong string and silenced a whole voice inside an otherwise
+sounding rig; it was caught only because the voice was soloed by injection.)
+
+pdbuild writes the escape for you, **idempotently**, in `obj()`, `msg()` and
+`comment()` on both `Patch` and `PdPatch` — `$1` and `\$1` land on the same
+bytes, and an already-escaped `\,` is never doubled into `\ \,` (the other
+half of this bug, which garbled a setup message). Write dollars naturally:
+
+```python
+a.obj("lop~ $2")                     # -> lop~ \$2   (creation arg 2)
+a.obj("delwrite~ $0-ks 300")         # -> \$0-ks     (instance-local buffer)
+p.msg("$5 $1 $2 $3 $4")              # -> \$5 \$1 …  (message dollars, expanded at message time)
+```
 
 Load-time expansion only triggers on `$` followed by a **digit** (`$0`, `$1`…).
 So `expr~`/`expr` variables written `$v1`, `$f1`, `$i1` pass through untouched
@@ -79,7 +103,8 @@ p.obj("expr 15000/$f1")      # BPM -> 16th-note ms
 
 In an **abstraction**, `$1..$n` are creation arguments and `$0` is a unique
 per-instance id — use `$0-name` for instance-local send/receive/array names so
-two copies don't collide.
+two copies don't collide. Under `[clone]`, `$1` is the instance number and the
+user's arguments start at `$2`. A bare `$1` in a *comment* errors at load too.
 
 ---
 
@@ -139,7 +164,15 @@ no `#X connect` lines.
 - `[trigger]`/`[t]` fires its outlets **right to left**.
 - `[unpack]` does too: the **highest-numbered outlet fires first**, outlet 0 last.
 - **Fan-out from a single outlet to several destinations is UNDEFINED order.**
-  If order matters, force it with `[t]`.
+  If order matters, force it with `[t]`. (In practice Pd 0.56 fires a fan-out
+  in connection order — do not build on it; the docs call it undefined.)
+- `[notein]` fires **channel, then velocity, then note** (right to left).
+  pdverify's `notein` shim used to fan out and deliver the channel last, so a
+  patch that gated on the channel dropped every first note played by
+  injection; fixed in pdverify 0.2.0 (channel first, as the real object).
+  `surface.note_split()` repacks `(note vel ch)` and unpacks again, so the
+  channel gates are set before the note passes whatever the source's order —
+  use it for any channel-routed MIDI input.
 
 This drives real design decisions. In a step sequencer each step must set the
 pitch *before* the envelope triggers, and the glide time *before* the pitch. With
@@ -198,7 +231,15 @@ short env. Hat = `noise~` → `hip~ 7000` × very short env.
 ### Broadcast clock
 One master `[metro]` → counter → `[mod 16]` → `[s xstep]`. Every module does
 `[r xstep]` and sequences itself. Everything stays locked, and modules stay
-independent.
+independent. `pdbuild.modules.swing_clock` is this with swing: the metro's
+interval is set *during its own tick* (it applies to the next tick — verified)
+to `pulsems * (pos == 0 ? 1 + swing : 1 − swing/(size−1))`, so the first pulse
+of each beat group leans and the group keeps its length. It broadcasts
+`pulse`, `pulsepos`, `bar` (before `pulse` on pulse 0), `halfpulse`, `pulsems`,
+and restarts on a `reset` receive — which `step_tables` bangs on a preset
+change, and which `melody_loop` uses to zero its pass counter, so the loop
+stays aligned to bar 1 (a loop that "repeated" while playing its second half
+first was a real bug; only a check anchored to musical time caught it).
 
 ### Surface / engine split
 Put each engine in its own abstraction exposing only `[outlet~]`. The top-level
@@ -213,6 +254,37 @@ Surface control → `[s cutoff]`; engine → `[r cutoff]`. Costs nothing and buy
   rig that has no mouse. Mutes wired this way let you render each module alone.
 
 If a parameter is worth exposing, expose it as a receive.
+
+### `_ui` receives + message twins — the control-surface standard
+Route the *widget* through a receive too. The standard, in `pdbuild.surface`:
+
+```
+engine reads        [r tempo]
+widget emits        [s tempo]      (from its outlet)
+widget listens on   tempo_ui       (its receive symbol)
+```
+
+Anything — the GUI itself, a hardware CC, a pad, a script, a test — sets a
+control by sending to `tempo_ui`; the widget updates on the panel **and**
+re-emits to `tempo`. There is one source of truth per control (the panel
+always shows what the engine has), and every control is injection-testable:
+`control.send("tempo_ui", 180)` in pdverify is exactly a hand on the slider.
+A MIDI map is then just `(cc, name, lo, hi) -> <name>_ui`, and its `[r fakecc]`
+twin makes the whole hardware layer testable headless except the physical
+last hop. Pads that flip or cycle a control read `[r name]` first so they act
+against the *current* value. Every widget gets its loadbang init (§2a) — it is
+part of the control, not something to remember.
+
+```python
+from pdbuild.surface import Control, column, display, pad_row, Pad, cc_map
+column(p, 20, 50, [Control("tempo", "hsl", default=168, lo=100, hi=220, label="TEMPO")])
+display(p, "lastmidi", 20, 300)                                   # a read-out: shows [s lastmidi]
+cc_map(p, [(74, "tempo", 100, 220)], x=600, y=40)                  # knob 1 -> tempo_ui, + fakecc
+```
+
+Read-out boxes are the one thing a render cannot check: `display(name,
+send="probe")` puts a name in the box's send slot; `[r probe] -> [print]` in a
+test then proves the box shows what it was sent (the runtime probe).
 
 ### Smoothed control signals (no zipper noise)
 ```python
@@ -258,10 +330,29 @@ pdverify is what makes blind construction viable. The techniques that paid off:
    which correctly redirected the hunt to the pad's coordinate reporting.
 5. **Pick the right measurement for the question.** A timbre *fingerprint* is
    time-averaged and **cannot detect note-order changes** — comparing two
-   generative melodies with `compare()` gave a meaningless 0.97. Compare
-   `top_partials` (pitch content) instead. Measure what you actually claim.
+   generative melodies with `compare()` gave a meaningless 0.97, twice. Measure
+   what you actually claim; pdverify 0.2.0 carries the measurands this needed:
+   - *does the loop repeat* → `music.loop_similarity(audio, loop_s)` (beat-wise;
+     a locked loop ~1.0, a reordered pass ~0.6) / `expect.repeats(loop_s)`;
+   - *what note is that pluck* → `Report.f0_hz` / `expect.f0("D2")` — the
+     harmonic root, not the loudest partial (routinely the 2nd–5th harmonic of
+     a Karplus-Strong string); `has_partial(tol_cents=)` and
+     `loudest_partial(note, kmax)` as the fallbacks;
+   - *how long is the bar* → solo a once-per-bar voice and read
+     `Report.ioi_mean_s` / `expect.ioi(seconds)`; *is it swung* → `ioi_cv`;
+     *what does the envelope repeat at* → `period_s` / `expect.period`;
+   - *does the tail ring on after the band stops* → `analyze(audio,
+     window=(5.5, 7.5))`, `music.window_rms_dbfs`, or `expect.within(t0, t1,
+     …)` on any expectation; skip the loadbang-default startup window the
+     same way.
 6. **Balance by numbers.** Render each part alone, read peak dBFS, and set gains
    from that instead of guessing.
+7. **Solo every voice by injection.** "The whole patch makes sound" hid a
+   silent voice (its abstraction's arguments had all loaded as 0). With every
+   level on a `_ui` receive, soloing is one `control.send` per voice.
+8. **Look at the panel.** `pdbuild.preview.layout_png(patch, "panel.png",
+   xmax=740)` draws the GUI zone at Pd's widget sizes; `preview.overlaps()`
+   lists controls sitting on each other.
 
 ### What verification can't do
 It confirms *health* (silent/clip/NaN), *tuning*, and *gross character*
