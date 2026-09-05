@@ -63,6 +63,20 @@ def test_overlaps_finds_a_buried_control_and_nothing_else():
     buried = PANEL.replace("#X obj 60 150 bng", "#X obj 25 152 bng")   # the bang now sits on the toggle
     pairs = overlaps(boxes(buried))
     assert len(pairs) == 1 and {pairs[0][0].kind, pairs[0][1].kind} == {"tgl", "bng"}
+    # plumbing drawn over a control is buried too (a real pad_row bug); comments are not
+    guts = PANEL.replace("#X obj 400 50 osc~ 440", "#X obj 30 52 s tempo")
+    pairs = overlaps(boxes(guts))
+    assert len(pairs) == 1 and pairs[0][1].kind == "obj"
+    assert overlaps(boxes(guts), guts=False) == []
+    assert overlaps(boxes(PANEL.replace("#X text 20 6", "#X text 30 52"))) == []
+
+
+def test_pad_row_plumbing_clears_the_row():
+    """REGRESSION (seen in a preview): the plumbing column landed on the 5th pad."""
+    from pdbuild.surface import Pad, pad_row
+    p = Patch()
+    pad_row(p, 20, 400, [Pad(f"p{i}", "momentary") for i in range(5)] + [Pad("x", "cycle", n=4)])
+    assert overlaps(boxes(p)) == []
 
 
 def test_layout_png_draws_the_widgets_where_they_are(tmp_path):

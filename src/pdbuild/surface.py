@@ -296,7 +296,8 @@ def pad_row(patch, x: int, y: int, pads: Sequence[Pad], *, spacing: int = 42,
     panel never disagree. Labels go in one comment under the row. Returns
     handles whose ``trigger`` is the receive a MIDI pad or a test bangs."""
     handles: list[PadHandle] = []
-    lx, ly = logic_at if logic_at else (x + plumb_dx, y)
+    # plumbing clears the whole row (a 5-pad row is wider than the column offset)
+    lx, ly = logic_at if logic_at else (x + max(plumb_dx, spacing * len(pads) + 16), y)
     for i, pad in enumerate(pads):
         px = x + i * spacing
         trig = pad.trigger_name()

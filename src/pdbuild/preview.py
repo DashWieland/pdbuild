@@ -157,13 +157,17 @@ def boxes(source) -> list[Box]:
 WIDGETS = ("hsl", "vsl", "hradio", "vradio", "tgl", "bng", "nbx", "floatatom", "symbolatom", "cnv")
 
 
-def overlaps(items: list[Box], *, kinds: tuple = WIDGETS) -> list[tuple[Box, Box]]:
-    """Pairs of boxes (of ``kinds``) whose rectangles intersect -- the "control
-    buried under another control" check, as data."""
+def overlaps(items: list[Box], *, kinds: tuple = WIDGETS, guts: bool = True) -> list[tuple[Box, Box]]:
+    """Pairs of boxes whose rectangles intersect where at least one is a
+    widget (of ``kinds``) -- the "control buried under something" check, as
+    data. With ``guts`` (default) an object or message box sitting on a
+    control counts too (a `[s name]` drawn over a pad is buried just the
+    same); comments are ignored, they are meant to sit by controls."""
     ws = [b for b in items if b.kind in kinds]
+    others = [b for b in items if b.kind in ("obj", "msg")] if guts else []
     bad = []
     for i, a in enumerate(ws):
-        for b in ws[i + 1:]:
+        for b in ws[i + 1:] + others:
             if a.x < b.x1 and b.x < a.x1 and a.y < b.y1 and b.y < a.y1:
                 bad.append((a, b))
     return bad
