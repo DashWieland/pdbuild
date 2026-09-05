@@ -26,7 +26,7 @@ from .extract import (
 from .legacy import PdPatch
 from .patch import OBJECT_IO, Patch, object_io
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 __all__ = [
     "Patch", "PdPatch", "OBJECT_IO", "object_io",
     "between", "downstream", "upstream", "crossing_edges",
