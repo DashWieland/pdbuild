@@ -352,7 +352,29 @@ pdverify is what makes blind construction viable. The techniques that paid off:
    level on a `_ui` receive, soloing is one `control.send` per voice.
 8. **Look at the panel.** `pdbuild.preview.layout_png(patch, "panel.png",
    xmax=740)` draws the GUI zone at Pd's widget sizes; `preview.overlaps()`
-   lists controls sitting on each other.
+   lists controls sitting on each other. Run it *in the build* whenever a
+   column grows — ember's PADS row was placed by a fixed offset under one
+   column and ended up under another column's last slider.
+9. **Measure the bus, not the voice.** A shaker designed at 6.5 kHz measured
+   −45 dBFS at the output while the calabash next to it measured −19: two
+   master filter stages (`bob~` ladders at a nominal 20 kHz) shave the top
+   octave, and no per-voice reasoning predicts that. Bang each voice alone
+   with the clock stopped (`control.bang("shaker")`, `run=0`) and read the
+   windowed RMS *at the output*.
+10. **Same notes, different render — the differential measurement.** Pd's
+   `random`/`noise~` seeds are fixed by creation order, so two renders of one
+   patch with only an effect control changed play identical notes. Then the
+   per-window 1/3-octave *difference* between the renders is the effect and
+   nothing else: a phaser showed as −20 dB notches walking from 400 Hz to
+   8 kHz where fingerprint similarity had shrugged (0.92). The same
+   determinism cuts the other way: adding a `noise~` earlier in the file
+   re-seeds every later one, so "loudest partial" checks flip between builds
+   for no musical reason — use `f0_hz` / band shares.
+11. **Onsets have a global floor.** `onset_times` counts rises through 30 % of
+   the render's *peak* envelope; a quieter answering voice (−41 dBFS after an
+   −80 dB gap) or a shaker between drum hits is not an onset however clearly
+   it sounds. For "did a note happen at t" use a local jump (short-window RMS
+   ≥ 20 dB over the preceding 250 ms).
 
 ### What verification can't do
 It confirms *health* (silent/clip/NaN), *tuning*, and *gross character*
