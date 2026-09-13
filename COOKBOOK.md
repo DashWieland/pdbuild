@@ -147,6 +147,8 @@ Same class of bug, other flavours:
 | `[f ]` | outputs **only when banged**; a value in its cold inlet is invisible until then. Prime it with `loadbang` if downstream math depends on it |
 | `[metro]` | start it with a nonzero float (`1`), not a bang |
 | cold inlets generally | hold a value but never fire — set them *before* the hot inlet arrives |
+| a glided control (`[pack f ms] → [line]`) | **an init is not a move.** The widget's loadbang value starts a full-length ramp, and `[line]` re-sends its value every grain until the ramp ends — for those seconds it overrides anything that sets the destination receive directly (tests, scenes, scripts). Put `[change <default>]` in front of the glide, or init the destination directly. (tend: two seconds of every timing check ran at the wrong tempo.) |
+| a latched pad (pending value, emitted on the bar) | **a latch must learn direct sets.** If `pattern` can also be set directly, feed `[r pattern]` into the pending store too, or the latch reverts the set on the next bar — and with `step_tables` resetting the bar on every pattern message, the revert breaks every timing downstream. |
 
 ### 2b. You cannot shadow a built-in class
 
