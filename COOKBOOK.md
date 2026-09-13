@@ -375,6 +375,24 @@ pdverify is what makes blind construction viable. The techniques that paid off:
    −80 dB gap) or a shaker between drum hits is not an onset however clearly
    it sounds. For "did a note happen at t" use a local jump (short-window RMS
    ≥ 20 dB over the preceding 250 ms).
+12. **Let the engine testify.** When audio cannot settle a claim (which note
+   a generator chose, which step a touch was planted at, whether the groove
+   variant changed, what the tune is after ten minutes), put a `[print tag]`
+   on the value inside the engine and read `res.pd_console` in the check --
+   `[r bar] -> counter -> every 32 bars -> [array get mel] -> [print melody]`
+   made "the loop has moved on" a count of rewritten steps where spectral
+   similarity had said 0.98. Harmless in use, exact in the test.
+13. **A scene restores everything, so measure something the rest can't move.**
+   tend's RECALL check compared level in a qraqeb-only bed and "failed":
+   the recall also restored FIRE and AIR, which reopened the drum, bass and
+   drone buses. Centroid saw DISTANCE come back; level saw the bed change.
+   Probes with `[print]` on the receive proved the recall had worked all along.
+14. **Audit library modules against the instrument before adopting them.**
+   `modules.melody_loop` (promoted from lila v3) still carries the float-into-
+   `[random]` drift bug that lila v4 fixed. A module that packages a known-
+   wrong pattern is worse than no module, because the next builder trusts it.
+   Say in the field log which modules a build adopted, which it rejected, and
+   why -- that list is how the library gets corrected.
 
 ### What verification can't do
 It confirms *health* (silent/clip/NaN), *tuning*, and *gross character*
