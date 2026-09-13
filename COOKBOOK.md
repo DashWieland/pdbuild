@@ -393,6 +393,19 @@ pdverify is what makes blind construction viable. The techniques that paid off:
    wrong pattern is worse than no module, because the next builder trusts it.
    Say in the field log which modules a build adopted, which it rejected, and
    why -- that list is how the library gets corrected.
+15. **Verify the sweep, not just the endpoints -- and one dial, one thing.**
+   tend's first surface passed a 33-corner "never bad" sweep and a ten-minute
+   unattended render, then played badly: "the only right way to play it is
+   to not touch it." Static corners cannot see motion. Every macro moved
+   several unlike things at once (tempo + tier steps + seven bus levels;
+   a scale table interpolated between modes), so no gesture had one audible
+   meaning. The contracts that catch it: *every edge is music* (each dial at
+   either end, others at default, inside a level window with onsets) and
+   *every scan is a musical move* (0->1->0 over ~14 s: no 1-s level step over
+   10 dB, and the dial's one measurand moving monotonically). And the design
+   rule behind them: a performance dial earns its place only if one turn is
+   one perceived change, monotonic, immediate, with both ends still music;
+   everything discrete is a pad that lands on the bar.
 
 ### What verification can't do
 It confirms *health* (silent/clip/NaN), *tuning*, and *gross character*
