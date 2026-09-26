@@ -178,6 +178,8 @@ class Graph(Node):
                  hide_name: bool = True) -> None:
         if style not in GRAPH_STYLES:
             raise ValueError(f"unknown graph style {style!r}; one of {tuple(GRAPH_STYLES)}")
+        if not name or re.search(r"[\s;,\\]", name):
+            raise ValueError(f"array name {name!r}: one symbol, no spaces, ';', ',' or backslash")
         if int(size) < 1:
             raise ValueError(f"a graph needs at least one point, got size {size}")
         if float(ylo) == float(yhi):

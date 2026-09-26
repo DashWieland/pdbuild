@@ -1,5 +1,103 @@
 # Changelog
 
+## 0.9.0 — graphs a player can see, multi-expression expr, takes that never overwrite
+
+Lifted from the `overtone` build (its field log, lessons 6 and 7). That script
+carried its own `ArrayGraph`, `mexpr()` and RECORD search because the library
+lacked them. Tests: 229 → 283. Every claim about Pd behaviour is checked
+against Pd 0.56.2 itself.
+
+### `Patch.graph()` — a graph-on-parent array
+
+`graph(name, size, x, y, w, h, ylo, yhi, *, style="points", hide_name=True,
+editable=False)` writes the four records Pd itself saves (`#N canvas …
+(subpatch)` / `#X array` / `#X coords` / `#X restore x y graph`). It is one
+box on the parent: one connection index, no inlets or outlets. py2pd's
+`add_array` writes a bare `#X array`, a table with nothing to see.
+
+- Flags are `2 * style` (polygon 0, points 1, bezier 2), plus 8 to hide the
+  name. The x range is fitted as Pd fits it: `size` for points, `size - 1`
+  for polygon and bezier.
+- **Pd does not clip an array to its graph**, so the range must hold every
+  value. The docstring, the README and the cookbook all say so.
+- `editable=False` sends `; name edit 0` from the loadbang, because in run
+  mode Pd lets a mouse drag write into any array and does not save the edit
+  state. A `$0-` name is locked through `[edit 0( → [s $0-name]`, since a
+  message box expands `$0` to 0.
+- Verified in Pd: a `; name` list and a `[tabwrite]` land, and `[array get]`
+  reads them back. Pd re-saves the four records unchanged. Pd complains
+  about a method arrays lack but not about `edit`. Two instances of an
+  abstraction keep their own `$0-` graphs.
+- `extract` counts a graph's table as allocated, like a bare `#X array`, so
+  cutting one into an abstraction warns that instances would collide.
+- Refused up front: an unknown style, an empty graph, `ylo == yhi`, and a
+  name that would split the record (a space, `;`, `,`).
+- Not yet: `Patch.load()` of a file holding a graph. py2pd raises
+  `ParseError` on `#X restore x y graph` (documented).
+
+### `object_io` — expr outlets, every count checked against Pd
+
+- `[expr]`, `[expr~]` and `[fexpr~]` have **one outlet per `;`-separated
+  expression** (written `\;` in files). The count was 1, so validation
+  refused a link from outlet 1. The outlets fire right to left, so a `[pack]`
+  fed from outlets 0..n-1 packs in order.
+- Inlets count `$i` and `$x` variables as well as `$f`, `$s` and `$v`; `$y`
+  (an fexpr~ output's past) opens none.
+- Declared: `until`, `makefilename`, `writesf~ N` (N inlets), `file patchpath`
+  and `file isfile` (1 in, 2 out).
+- **Fixed, found by checking the table against Pd:** `rev3~` has 6 inlets,
+  not 2 (L, R, then level, liveness, crossover and damping; a link to the
+  level inlet was refused). `noise~` has 1 inlet (`seed`), not 0. `inlet~`
+  has 1 inlet and 2 outlets (control data on the second), not 0 and 1.
+  `tests/test_patch.py::test_declared_arity_agrees_with_pd` connects one past
+  every declared port, and Pd must refuse exactly those (`connection failed`).
+
+### `pdbuild.preview` draws graphs
+
+- `boxes()` returns a graph as `kind="graph"`, carrying its `plots` (name,
+  size, style, hidden name, any `#A` contents saved in the file) and its data
+  `bounds`. `overlaps()` counts graphs as part of the face.
+- `layout_png(…, arrays={name: values})` draws the values where Pd would:
+  points as dashes, polygons as lines, unclipped, with out-of-range values
+  in red outside the box.
+- **Fixed:** a `[pd sub]` or a graph took no index in `boxes()`. It closed
+  back to depth 1 rather than 0, so every box after one was numbered one
+  short. A bare `#X array` took none either; Pd counts each as one box. A
+  test wires a patch with `boxes()`' indices and Pd delivers. A
+  graph-on-parent subpatch is its rectangle, and `#N struct` no longer opens
+  a canvas.
+- **Fixed:** `layout_png` drew inside matplotlib's default subplot margins,
+  shrinking the canvas about 0.78× and offsetting it. It now draws 1 px per
+  canvas unit, with a title in its own band above.
+
+### `surface.record_takes()` — RECORD that never overwrites
+
+`record_takes(patch, source_l, source_r, *, recv="record", prefix="take_",
+x, y)`: on `record 1` it finds the first free `take_NNN.wav` (001..999) beside
+the patch and records 24-bit stereo into it with `[writesf~ 2]`. `record 0`
+stops. The path is printed. The search is overtone's: `[until]` →
+`[makefilename]` → `[file patchpath]` → `[file isfile]`. **`[file isfile]`
+bangs its right outlet for a missing path and never outputs 0**, so the
+right outlet means "free".
+
+**The earlier rigs overwrite takes.** `lila_rig`, `ember` and `tend` number
+their takes from `take_001` at every launch. The first RECORD of a new
+session therefore overwrites the previous session's `take_001.wav`, and so
+on up. They are frozen and left as they are; new instruments should use
+`record_takes`.
+
+It is verified in real time, since a batch run ends before `writesf~`'s disk
+thread has opened the file and no take appears. Two launches in a folder
+with a space in its name, which already holds a `take_002.wav`, write 001
+and then 003. They leave 002 byte for byte, and each take is 0.55 s of the
+440 Hz test tone, on `Patch` and on `PdPatch`.
+
+### Tests
+
+`tests/conftest.py` adds a `run_pd` fixture for claims about Pd rather than
+the sound. It opens patches in a headless Pd, in batch or in real time,
+returns the console, and reports which connections Pd refused.
+
 ## 0.8.0 — control surfaces, a layout preview, the control-tier modules, complete escaping
 
 Everything here was invented inside one instrument's build script (`lila_rig`,

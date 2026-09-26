@@ -89,6 +89,7 @@ already does well (GUI constructors, arrays, subpatches, SVG, round-tripping).
 | `comment(text, x, y)` | Comment. **Takes a connection index** like any box; escaped like a message. |
 | `floatatom(x, y, send=, receive=, width=)` | Number box. `send` and `receive` are **distinct slots**. |
 | `abstraction(name, inlets=, outlets=)` | An instance of a sibling `<name>.pd`. |
+| `graph(name, size, x, y, w, h, ylo, yhi, style=, hide_name=, editable=)` | A graph-on-parent array: a table the player can **see**. One index, no ports; locked against mouse edits at load unless `editable=True`. |
 | `link(src, outlet, sink, inlet)` | Wire two boxes, reading left to right. |
 | `chain(*nodes)` | Wire outlet 0 → inlet 0 down a run. |
 | `loadbang()` | The patch's shared `[loadbang]`, created on first use. |
@@ -129,6 +130,37 @@ returns `None` for objects it doesn't know — which was most of the DSP objects
 we lean on. `Patch` declares counts for those (`bob~`, `rev3~`, `else/pad`,
 `vline~`, `pack`, `expr`, …), and `unvalidated()` reports anything still
 unchecked. Print it after a build.
+
+Arities that depend on the arguments are computed: `pack f f f` has three
+inlets, `writesf~ 2` two, and a multi-expression `expr $f1 + $f2; $f1 * $f2`
+has one outlet **per expression** (they fire right to left, so a `[pack]` fed
+from outlets 0..n-1 packs in order). Every declared count is checked against
+Pd itself by the test suite: a connection one past the last port must be
+refused (`connection failed`), and one onto it must not.
+
+### `graph()` — a table the player can see
+
+```python
+p = Patch(origin=(900, 40))                              # plumbing starts right of the face
+p.graph("tune", 24, 500, 60, 288, 264, 5.5, 16.5)        # 24 steps; values 6..16 sit inside
+p.graph("head", 24, 500, 330, 288, 12, 0, 1.5)           # a 0/1 lane: 1s inside, 0s on the edge
+```
+
+The cheapest visual feedback Pd has. Write it like any table (`[tabwrite
+tune]`, `; tune 0 8 9 10 …`, `[array set tune]`). Three things to know:
+
+- **Pd does not clip an array to its graph.** A value outside `[ylo, yhi]` is
+  drawn outside the box, over whatever sits there. Choose a range that holds
+  every value the patch will ever write.
+- **In run mode Pd lets the mouse draw into any array**, so a display is
+  secretly an input. `editable=False` (the default) sends `; tune edit 0`
+  from the loadbang; the edit state is not saved in the file. That message
+  goes at the placement cursor, like `init()`'s, so start the cursor off the
+  face (`Patch(origin=…)`). A `$0-` name is locked through `[s $0-tune]`,
+  because a message box expands `$0` to `0`.
+- `preview.layout_png(p, …, arrays={"tune": seed})` draws it with data.
+  `Patch.load()` cannot read a graph back yet: py2pd's parser rejects
+  `#X restore … graph`.
 
 ### Layout
 
@@ -315,6 +347,7 @@ display(p, "lastmidi", 20, 300)                 # a number box that SHOWS [s las
 pad_row(p, 20, 340, [Pad("stutter", "momentary"), Pad("pattern", "cycle", n=4), Pad("drone", "toggle")])
 cc_map(p, [(74, "tempo", 100, 220), (71, "swing", 0, 0.45)], x=600, y=40)   # + [r fakecc] twin, LAST CC
 note_split(p, pad_channel=10, x=600, y=300)     # [notein] -> midi_in / pad_in, deterministic
+record_takes(p, out_l, out_r, x=600, y=500)     # [r record]: 1 -> the next free take_NNN.wav, 0 -> stop
 ```
 
 | Function | What it does |
@@ -325,6 +358,7 @@ note_split(p, pad_channel=10, x=600, y=300)     # [notein] -> midi_in / pad_in, 
 | `pad_row(patch, x, y, [Pad…])` | Momentary / toggle / cycle pads; flip and cycle read the control's *current* value. Each handle's `trigger` is the receive a MIDI pad bangs. |
 | `cc_map(patch, [(cc, name, lo, hi)…], x=, y=)` | `[ctlin]` router onto `<name>_ui`, a `[r fakecc]` twin, LAST-CC sends. |
 | `note_split(patch, pad_channel=10, x=, y=)` | `[notein]` repacked then unpacked: channel gates set before the note passes. |
+| `record_takes(patch, left, right, recv="record", prefix="take_", x=, y=)` | RECORD: on `record 1` the first free `take_NNN.wav` beside the patch, 24-bit stereo via `[writesf~ 2]`; `record 0` stops. **Never overwrites a take.** |
 
 Every function works on `Patch` and on the frozen `PdPatch`. What a headless
 render *can* verify here is verified: the init value reaches the engine,
@@ -332,13 +366,32 @@ setting `<name>_ui` by injection moves it, a CC lands on the widget, notes
 split by channel, and a `display()` really re-emits what it shows (the
 runtime probe — put a name in its send slot and print it).
 
+`record_takes` searches `001, 002, …` with `[file patchpath]` and
+`[file isfile]`. Note that `[file isfile]` **bangs its right outlet** for a
+missing path and never outputs `0`. Earlier rigs counted from `take_001` at
+every launch, so a new session's first take overwrote the last session's.
+It is verified in real time, because a batch render ends before
+`writesf~`'s disk thread has opened the file. Two launches in a folder that
+already holds `take_002.wav` write 001 and then 003, and leave 002
+untouched.
+
 ## Layout preview — `pdbuild.preview`
 
 An agent never sees the canvas. `boxes(patch_or_text_or_path)` returns every
 box with its canvas rectangle — widgets at Pd's real sizes (an `hsl` is its
-length × 16, an `hradio` is cells × size) — `overlaps()` lists buried
-controls, and `layout_png(patch, "panel.png", xmax=740)` draws the GUI zone
-with matplotlib (`pip install -e .[preview]`).
+length × 16, an `hradio` is cells × size), graphs at their `#X coords` size
+with their arrays and value range — `overlaps()` lists buried controls
+(graphs included), and `layout_png(patch, "panel.png", xmax=740)` draws the
+GUI zone with matplotlib (`pip install -e .[preview]`), one pixel per canvas
+unit.
+
+Graphs are drawn with their data when you pass it:
+`layout_png(p, "face.png", arrays={"tune": seed_tune})`, or from contents the
+file saved. The values come from the build's own data or from the engine's
+testimony in a render (`[array get tune] → [print tune]`). They land where Pd
+would draw them, unclipped: an out-of-range value appears outside the box, in
+red. Every `[pd sub]`, graph and bare array counts as one index, as it does
+in Pd (the preview used to skip them and number everything after one short).
 
 ## `PdPatch` — the legacy emitter
 

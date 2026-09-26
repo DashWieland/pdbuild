@@ -95,7 +95,8 @@ def test_instance_local_graph_escapes_its_dollar_and_locks_through_an_object():
     assert "; \\$0-tune" not in text.replace("\\;", ";")
 
 
-@pytest.mark.parametrize("kw", [dict(style="dots"), dict(size=0), dict(ylo=1, yhi=1)])
+@pytest.mark.parametrize("kw", [dict(style="dots"), dict(size=0), dict(ylo=1, yhi=1),
+                                dict(name="my tune"), dict(name="a;b"), dict(name="")])
 def test_graph_rejects_what_pd_cannot_draw(kw):
     args = dict(name="t", size=8, x=0, y=0, w=100, h=50, ylo=0, yhi=1)
     args.update(kw)

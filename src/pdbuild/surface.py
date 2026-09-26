@@ -489,7 +489,9 @@ def record_takes(patch, source_l, source_r, *, recv: str = "record", prefix: str
 
     Wire it to the final output, after the limiter, and drive ``recv`` from a
     toggle (``control(p, "record", "tgl", default=0)`` emits ``[s record]``)
-    or a pad. DSP must be running, as it is in any instrument that plays.
+    or a pad. The toggle's loadbang 0 is harmless: a ``stop`` with no take
+    open is silent. DSP must be running, as it is in any instrument that
+    plays.
 
     Why a search: a rig that numbers from ``take_001`` at every launch
     overwrites the last session's takes the first time RECORD is pressed.

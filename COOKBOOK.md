@@ -106,6 +106,40 @@ per-instance id — use `$0-name` for instance-local send/receive/array names so
 two copies don't collide. Under `[clone]`, `$1` is the instance number and the
 user's arguments start at `$2`. A bare `$1` in a *comment* errors at load too.
 
+**`$0` in a message box is `0`** (Pd 0.56.2). `[; $0-tune edit 0(` sends to
+`0-tune` and the console says `0-tune: no such object`. Only an object box
+expands `$0`, at creation, so address an instance-local name through one:
+`[edit 0( → [s $0-tune]`.
+
+### Graphs — an array the player can see
+
+A graph-on-parent array is four records and **one box**: it takes one
+connection index on the parent, like any object, and has no ports.
+
+```
+#N canvas 0 50 450 250 (subpatch) 0;
+#X array tune 24 float 10;               <- flags: 2*style (0 polygon, 1 points, 2 bezier),
+#X coords 0 16.5 24 5.5 288 264 1 0 0;   <-   +8 hides the name, +1 saves the contents
+#X restore 500 60 graph;                 <- x 0..24, top 16.5, bottom 5.5, 288 x 264 px
+```
+
+py2pd's `add_array` writes only the bare `#X array`: a table, but nothing on
+screen (it too takes an index). `Patch.graph()` writes all four, as Pd itself
+saves them; Pd 0.56.2 re-saves them unchanged, adding `#A color` / `#A width`
+(and `#A resize` for a hidden name). An `#A …` line is a message to the array
+just created: `#A 0 v0 v1 …` is data, `#A resize 8` a resize. For points the
+x range is the size (each value is a dash one index wide); for a polygon or
+bezier it is size − 1 (the last vertex sits on the edge).
+
+- **Pd does not clip an array to its graph.** A value outside the range is
+  drawn outside the box, over its neighbours. The range must hold every value.
+  For a lane of 0/1 flags, `ylo=0, yhi=1.5` puts the 1s inside and the 0s on
+  the edge.
+- **In run mode the mouse can draw into any array**: a display is secretly
+  an input that writes fractional, off-scale values into the engine's table.
+  Send `; tune edit 0` at load (`Patch.graph(editable=False)`, the default).
+  The edit state is not saved in the file.
+
 ---
 
 ## 2. Semantics that will bite you
@@ -165,6 +199,11 @@ no `#X connect` lines.
 
 - `[trigger]`/`[t]` fires its outlets **right to left**.
 - `[unpack]` does too: the **highest-numbered outlet fires first**, outlet 0 last.
+- So does a multi-expression `[expr a; b; c]`: one outlet per expression, the
+  last expression first. Feed a `[pack f f f]` from outlets 0, 1, 2 and it
+  packs `a b c` in order, because outlet 0 reaches the hot inlet last. One
+  expr can compute a whole envelope's numbers. (`object_io` counts the
+  outlets; before 0.9.0 it said one, and validation refused outlet 1.)
 - **Fan-out from a single outlet to several destinations is UNDEFINED order.**
   If order matters, force it with `[t]`. (In practice Pd 0.56 fires a fan-out
   in connection order — do not build on it; the docs call it undefined.)
@@ -221,6 +260,9 @@ All confirmed to load and render under `pd -nogui -batch -noaudio` on 0.56.
 | `noise~` | drums/texture | + `bp~` = snare, + `hip~ 7000` = hat |
 | `mtof` | MIDI → Hz | |
 | `else/pad` (ELSE) | X-Y control surface | outlet emits `list x y` **and** `click` → split with `[route list click]`; coords range = the creation-arg `dim` |
+| `[file patchpath]` | a path beside the patch | a symbol in → `<patch dir>/<symbol>` out the left (a space in the directory is fine: it stays one symbol); a bang → the directory |
+| `[file isfile]` | does this file exist? | an existing file → `1` out the **left**; a missing one **bangs the right outlet**. It never outputs `0`, so a `[sel 0]` on the left waits forever |
+| `writesf~ N` | record to disk | `open -bytes 3 <path>, start` … `stop`; a `stop` with nothing open is silent. Check it in **real time**: a batch run ends before the disk thread opens the file, and no file appears |
 
 **Drum voices, cheaply:** kick = `vline~` pitch sweep (110→45 Hz) into `osc~`,
 times an amp `vline~`, into `tanh` for punch. Snare = `noise~` → `bp~ 1900 3` ×
@@ -305,6 +347,16 @@ in the file. Choose the column order to satisfy §2c.
 `[r pattern]` → `[== n]` → `[spigot]` per pattern; gate the step through the
 spigot into that pattern's `[sel ...]` chains. Remember to **initialize the
 selector** (§2a) or every spigot stays shut.
+
+### RECORD: takes that never overwrite
+A rig that numbers its takes from `take_001` at every launch overwrites the
+last session's takes the first time RECORD is pressed. lila_rig, ember and
+tend all do this. Search for the first free name instead: `[until]` counts
+1, 2, … → `[makefilename take_%03d.wav]` → `[file patchpath]` → `[file
+isfile]`. The **right** outlet's bang means "free": stop the `[until]`,
+then `open -bytes 3 <path>, start` on `[writesf~ 2]`. `surface.record_takes`
+is exactly this. It prints each take's path so the player knows which file
+they made.
 
 ### Always
 - `clip~ -1 1` before `dac~`.
@@ -408,6 +460,16 @@ pdverify is what makes blind construction viable. The techniques that paid off:
    rule behind them: a performance dial earns its place only if one turn is
    one perceived change, monotonic, immediate, with both ends still music;
    everything discrete is a pad that lands on the bar.
+16. **Ask Pd itself when the claim is about Pd, not the sound.** Three
+   probes that need no audio. *Arity*: connect one past an object's last
+   inlet or outlet, and Pd refuses with `x.pd 6 0 2 2 (float->expr)
+   connection failed`. That is how pdbuild's whole I/O table is checked, and
+   how `rev3~` was found to have six inlets, not two. *The file format*:
+   `; pd-x.pd savetofile saved.pd <dir>` makes Pd write the patch back, and
+   any record it rewrites is one you wrote in a non-canonical form.
+   *Disk writes*: run in real time (`pd -nogui -noaudio` with a driver patch
+   sending `; record 1`, `; record 0` and `; pd quit` on delays). pdbuild's
+   tests have a `run_pd` fixture for all three.
 
 ### What verification can't do
 It confirms *health* (silent/clip/NaN), *tuning*, and *gross character*
@@ -427,3 +489,11 @@ Function doesn't care about coordinates; humans do.
 - Auto-flowed columns are fine for engine internals nobody reads. The real
   answer for human-readable patches is §4's surface/engine split: hide the guts
   in an abstraction so nobody has to read them.
+- Anything created at the cursor during the face's construction lands on the
+  face: the shared `loadbang`, `init()` messages, and a graph's `edit 0`
+  lock. Start the cursor off the panel (`Patch(850, 800, origin=(1300, 40))`
+  opens an 850-wide window on the face alone, with the machinery at x ≥ 1300)
+  and check with `preview.overlaps()`, which counts graphs as face.
+- A graph is the cheapest thing a player can watch. Draw the face with data
+  (`layout_png(p, "face.png", arrays={"tune": seed})`) and look before you
+  ship it: a value that falls outside its graph shows red, outside the box.
