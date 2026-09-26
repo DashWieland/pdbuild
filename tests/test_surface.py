@@ -12,8 +12,9 @@ from __future__ import annotations
 import pytest
 
 from pdbuild import Patch, PdPatch
+from pdbuild.preview import boxes
 from pdbuild.surface import (
-    Control, Pad, cc_map, column, control, display, note_split, pad_row, ui_name, widget_text,
+    Control, Pad, cc_map, column, control, display, note_split, pad_row, record_takes, ui_name, widget_text,
 )
 
 BUILDERS = [pytest.param(Patch, id="Patch"), pytest.param(PdPatch, id="PdPatch")]
@@ -281,3 +282,87 @@ def test_display_really_shows_its_value_runtime_probe(Builder, tmp_path):
     path.write_text(p.render(), encoding="utf-8")
     res = render(str(path), RenderSpec(duration=0.3, controls=tuple(ctl.send("lvl", 42))))
     assert "PROBE: 42" in res.pd_console
+
+
+# --------------------------------------------------------------------------- #
+# RECORD: numbered takes that never overwrite
+# --------------------------------------------------------------------------- #
+
+def _connections(p) -> set[tuple[int, int, int, int]]:
+    return {tuple(int(v) for v in l.rstrip(";").split()[2:6])
+            for l in p.render().splitlines() if l.startswith("#X connect")}
+
+
+@pytest.mark.parametrize("Builder", BUILDERS)
+def test_record_takes_searches_with_the_right_outlet_of_file_isfile(Builder):
+    """`[file isfile]` BANGS ITS RIGHT OUTLET for a missing path and never
+    outputs 0: the right outlet is the "free" signal and the left (1 = the
+    file exists) must lead nowhere, or every take would overwrite."""
+    p = Builder()
+    osc = p.obj("osc~ 440", 20, 20)
+    h = record_takes(p, osc, (osc, 0), x=300, y=40)
+    idx = {b.text: b.index for b in boxes(p)}
+    conns = _connections(p)
+    text = p.render()
+    for t in ("r record", "sel 1 0", "until", "makefilename take_%03d.wav", "file patchpath",
+              "file isfile", "symbol", "print take", "writesf~ 2"):
+        assert t in idx, t
+    assert "open -bytes 3 \\$1" in text and "start;" in text and "stop;" in text
+    isf = idx["file isfile"]
+    assert {(a, o) for a, o, _b, _i in conns if a == isf} == {(isf, 1)}
+    wsf = idx["writesf~ 2"]
+    assert (idx["osc~ 440"], 0, wsf, 0) in conns and (idx["osc~ 440"], 0, wsf, 1) in conns
+    assert (h.recv, h.prefix, h.print_tag) == ("record", "take_", "take")
+
+
+def test_record_takes_is_fully_validated_on_patch():
+    p = Patch()
+    osc = p.obj("osc~ 440", 20, 20)
+    record_takes(p, osc, osc, recv="rec", prefix="takes/mix_", x=300, y=40)
+    assert p.unvalidated() == []
+    assert "r rec;" in p.render() and "makefilename takes/mix_%03d.wav;" in p.render()
+
+
+@pytest.mark.parametrize("prefix", ["my take ", "take%", "a;b", "a,b", "$0-take", "a\b", ""])
+def test_record_takes_rejects_a_prefix_pd_would_split(prefix):
+    with pytest.raises(ValueError):
+        record_takes(Patch(), None, None, prefix=prefix, x=0, y=0)
+
+
+@pytest.mark.parametrize("Builder", BUILDERS)
+def test_record_takes_never_overwrites_a_take(Builder, tmp_path, run_pd):
+    """In real time (a batch run ends before writesf~'s disk thread opens the
+    file): two launches in a folder whose name has a space, which already
+    holds a take_002.wav. The first launch takes 001, the second skips the
+    existing 002 for 003, 002 is untouched, and both takes hold the tone."""
+    from pdverify import analyze, read_wav
+
+    d = tmp_path / "my takes"
+    d.mkdir()
+    (d / "take_002.wav").write_bytes(b"keep me")
+    p = Builder()
+    osc = p.obj("osc~ 440", 20, 60)
+    amp = p.obj("*~ 0.25", 20, 90)
+    wire = p.link if hasattr(p, "link") else p.connect
+    wire(osc, 0, amp, 0)
+    dsp = p.msg("; pd dsp 1", 20, 20)
+    wire(p.loadbang(), 0, dsp, 0)
+    record_takes(p, amp, amp, x=300, y=40)
+    p.save(d / "inst.pd")
+    s = Patch()
+    for at, m in ((150, "; record 1"), (700, "; record 0"), (900, "; pd quit")):
+        dl = s.obj(f"del {at}")
+        s.link(s.loadbang(), 0, dl, 0)
+        s.link(dl, 0, s.msg(m), 0)
+    s.save(d / "drive.pd")
+
+    consoles = [run_pd("inst.pd", "drive.pd", cwd=d, realtime=True) for _ in range(2)]
+    assert sorted(f.name for f in d.glob("take_*.wav")) == ["take_001.wav", "take_002.wav", "take_003.wav"]
+    assert (d / "take_002.wav").read_bytes() == b"keep me"
+    assert "take_001.wav" in consoles[0] and "take_003.wav" in consoles[1]
+    for name in ("take_001.wav", "take_003.wav"):
+        a = read_wav(d / name)
+        dur = a.samples.shape[0] / a.sr
+        assert a.samples.shape[1] == 2 and dur == pytest.approx(0.55, abs=0.02), (name, dur)
+        r = analyze(a)
+        assert r.pitch_hz == pytest.approx(440, abs=3) and r.rms_dbfs == pytest.approx(-15.1, abs=0.5)

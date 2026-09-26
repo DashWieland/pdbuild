@@ -32,17 +32,19 @@ and ``link`` (Patch) or ``connect`` (PdPatch).
     pad_row(p, 20, 340, [Pad("stutter", "momentary"), Pad("pattern", "cycle", n=4), Pad("drone", "toggle")])
     cc_map(p, [(74, "tempo", 100, 220), (71, "swing", 0, 0.45)], x=600, y=40)
     note_split(p, pad_channel=10, x=600, y=300)
+    record_takes(p, out_l, out_r, x=600, y=500)   # [r record]: 1 -> the next free take_NNN.wav, 0 -> stop
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Sequence
 
 __all__ = [
     "Control", "ControlHandle", "control", "column", "widget_text",
     "display", "Pad", "PadHandle", "pad_row", "CCMap", "cc_map", "NoteSplit", "note_split",
-    "ui_name",
+    "RecordTakes", "record_takes", "ui_name",
 ]
 
 KINDS = ("hsl", "vsl", "hradio", "vradio", "tgl", "bng", "nbx")
@@ -66,6 +68,15 @@ def _wire(patch, src, outlet, dst, inlet=0) -> None:
 
 def _is_legacy(patch) -> bool:
     return not hasattr(patch, "link")
+
+
+def _port(x) -> tuple:
+    """A node (its outlet 0) or a ``(node, outlet)`` pair -> ``(node, outlet)``,
+    the port convention of ``pdbuild.modules``."""
+    if isinstance(x, tuple):
+        node, outlet = x
+        return node, int(outlet)
+    return x, 0
 
 
 def _init(patch, widget, value, x: int, y: int):
@@ -450,3 +461,104 @@ def note_split(patch, *, pad_channel: int = 10, x: int, y: int, keys_send: str =
     _wire(patch, key_gate, 0, sk, 0)
     _wire(patch, pad_gate, 0, sp, 0)
     return NoteSplit(keys_send, pads_send, ni, [pk, un, chq, tf, pad_gate, key_gate, not_pad, nv, sk, sp])
+
+
+# --------------------------------------------------------------------------- #
+# RECORD: numbered takes next to the patch, never overwriting one
+# --------------------------------------------------------------------------- #
+
+@dataclass
+class RecordTakes:
+    recv: str                    # send 1 here to start a take, 0 to stop it
+    prefix: str                  # takes are <prefix>001.wav ... <prefix>999.wav, next to the patch
+    writer: object               # the [writesf~ 2]
+    print_tag: str = "take"      # the console line naming each take's file
+    nodes: list = field(default_factory=list)
+
+
+_BAD_PREFIX = re.compile(r"[\s%;,$\\]")
+
+
+def record_takes(patch, source_l, source_r, *, recv: str = "record", prefix: str = "take_",
+                 x: int, y: int) -> RecordTakes:
+    """A RECORD that never overwrites a take. ``<recv> 1`` finds the first
+    free ``<prefix>NNN.wav`` (001..999) in the patch's own directory and
+    records ``source_l`` / ``source_r`` into it (24-bit WAV, ``[writesf~
+    2]``); ``<recv> 0`` stops. Each take's full path is printed (``take: ...``)
+    so the player knows which file they made.
+
+    Wire it to the final output, after the limiter, and drive ``recv`` from a
+    toggle (``control(p, "record", "tgl", default=0)`` emits ``[s record]``)
+    or a pad. DSP must be running, as it is in any instrument that plays.
+
+    Why a search: a rig that numbers from ``take_001`` at every launch
+    overwrites the last session's takes the first time RECORD is pressed.
+    ``[file patchpath]`` turns ``take_001.wav`` into a path beside the patch;
+    ``[file isfile]`` tests it. **``[file isfile]`` BANGS ITS RIGHT OUTLET for
+    a missing path -- it never outputs 0** (an existing file puts 1 out the
+    left), so the right outlet is the "this one is free" signal. The first gap
+    is taken: with 001 and 003 on disk, the next take is 002. (Verified on Pd
+    0.56.2, including a directory with a space in its name.)
+
+    Verify it in real time (``pd -nogui -noaudio``, a driver patch sending
+    ``; record 1`` / ``; record 0`` / ``; pd quit`` on delays): a batch render
+    reaches its end before ``writesf~``'s disk thread has opened the file, and
+    no take appears at all.
+
+    ``source_l`` / ``source_r`` are nodes (outlet 0) or ``(node, outlet)``
+    pairs; for mono pass the same port twice. ``prefix`` may include a
+    subdirectory (``"takes/take_"``) if that directory exists; it may not
+    contain spaces, ``%``, ``;``, ``,``, ``$`` or a backslash.
+    """
+    if not prefix or _BAD_PREFIX.search(prefix):
+        raise ValueError(f"record_takes prefix {prefix!r}: no spaces, %, ;, ,, $ or backslashes")
+    r = patch.obj(f"r {recv}", x, y)
+    sel = patch.obj("sel 1 0", x, y + 24)
+    _wire(patch, r, 0, sel, 0)
+    stop = patch.msg("stop", x + 150, y + 48)
+    _wire(patch, sel, 1, stop, 0)
+    # 1: reset the count, then search 001, 002, ... until a name is free
+    go = patch.obj("t b b", x, y + 48)
+    _wire(patch, sel, 0, go, 0)
+    zero = patch.msg("0", x + 60, y + 72)
+    count = patch.obj("f", x, y + 120)
+    _wire(patch, go, 1, zero, 0)
+    _wire(patch, zero, 0, count, 1)
+    cap = patch.msg("999", x, y + 72)
+    loop = patch.obj("until", x, y + 96)
+    _wire(patch, go, 0, cap, 0)
+    _wire(patch, cap, 0, loop, 0)
+    _wire(patch, loop, 0, count, 0)
+    inc = patch.obj("+ 1", x, y + 144)
+    _wire(patch, count, 0, inc, 0)
+    tf = patch.obj("t f f", x, y + 168)
+    _wire(patch, inc, 0, tf, 0)
+    _wire(patch, tf, 1, count, 1)
+    mk = patch.obj(f"makefilename {prefix}%03d.wav", x, y + 192)
+    _wire(patch, tf, 0, mk, 0)
+    where = patch.obj("file patchpath", x, y + 216)      # "take_001.wav" -> "<patch dir>/take_001.wav"
+    _wire(patch, mk, 0, where, 0)
+    ts = patch.obj("t s s", x, y + 240)
+    _wire(patch, where, 0, ts, 0)
+    hold = patch.obj("symbol", x + 150, y + 288)
+    _wire(patch, ts, 1, hold, 1)                         # keep the candidate ...
+    isf = patch.obj("file isfile", x, y + 264)
+    _wire(patch, ts, 0, isf, 0)                          # ... and test it
+    free = patch.obj("t b b", x, y + 288)
+    _wire(patch, isf, 1, free, 0)                        # RIGHT outlet: a bang = no such file = free
+    _wire(patch, free, 1, loop, 1)                       # stop the search first,
+    _wire(patch, free, 0, hold, 0)                       # then take the name
+    name = patch.obj("t s s", x + 150, y + 312)
+    _wire(patch, hold, 0, name, 0)
+    pr = patch.obj("print take", x + 300, y + 336)
+    _wire(patch, name, 1, pr, 0)
+    opn = patch.msg("open -bytes 3 $1, start", x + 150, y + 336)
+    _wire(patch, name, 0, opn, 0)
+    wsf = patch.obj("writesf~ 2", x + 150, y + 384)
+    _wire(patch, opn, 0, wsf, 0)
+    _wire(patch, stop, 0, wsf, 0)
+    for inlet, src in enumerate((source_l, source_r)):
+        node, outlet = _port(src)
+        _wire(patch, node, outlet, wsf, inlet)
+    nodes = [r, sel, stop, go, zero, count, cap, loop, inc, tf, mk, where, ts, hold, isf, free, name, pr, opn, wsf]
+    return RecordTakes(recv, prefix, wsf, "take", nodes)
