@@ -159,8 +159,10 @@ tune]`, `; tune 0 8 9 10 …`, `[array set tune]`). Three things to know:
   face (`Patch(origin=…)`). A `$0-` name is locked through `[s $0-tune]`,
   because a message box expands `$0` to `0`.
 - `preview.layout_png(p, …, arrays={"tune": seed})` draws it with data.
-  `Patch.load()` cannot read a graph back yet: py2pd's parser rejects
-  `#X restore … graph`.
+- `Patch.load()` reads graphs back. A graph written by `Patch.graph` comes
+  back as a `Graph`, byte for byte. Any other graph comes back as py2pd's
+  `Graph`, which keeps every record verbatim. That covers one made in Pd's
+  GUI with "save contents" on: its `#A` data survives a load and a save.
 
 ### Layout
 

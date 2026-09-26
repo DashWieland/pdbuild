@@ -184,3 +184,71 @@ def test_pd_keeps_an_instance_local_graph_to_its_instance(tmp_path, run_pd):
     console = run_pd(tmp_path / "main.pd", cwd=tmp_path)
     assert "GOT: 3 3 3 3" in console and "GOT: 7 7 7 7" in console, console
     assert "error" not in console.lower(), console
+
+
+# --------------------------------------------------------------------------- #
+# loading a graph back (0.9.1): py2pd raised ParseError on `#X restore x y graph`
+# --------------------------------------------------------------------------- #
+
+def _graphed_patch() -> Patch:
+    p = Patch(400, 300)
+    osc = p.obj("osc~ 220"); dac = p.obj("dac~")
+    p.link(osc, 0, dac, 0)
+    p.graph("tune", 24, x=20, y=120, w=200, h=80, ylo=0, yhi=16)
+    p.graph("lane", 8, x=240, y=120, w=120, h=40, ylo=0, yhi=1.5, style="polygon", hide_name=False)
+    step = p.obj("tabread tune"); p.link(p.obj("f 3"), 0, step, 0)
+    return p
+
+
+def test_a_saved_graph_loads_back_as_a_graph_byte_for_byte(tmp_path):
+    p = _graphed_patch()
+    p.save(tmp_path / "g.pd")
+    q = Patch.load(tmp_path / "g.pd")
+    graphs = [n for n in q.pd.nodes if type(n).__name__ == "Graph"]
+    assert len(graphs) == 2 and all(isinstance(g, Graph) for g in graphs)   # ours, not py2pd's
+    built = [str(n) for n in p.pd.nodes if isinstance(n, Graph)]
+    assert [str(g) for g in graphs] == built                                  # the records, exactly
+    # the rest too, bar py2pd's single-space normalisation of message boxes on
+    # load ("  \;  x edit 0" comes back "\;  x edit 0"), which Pd tokenises alike
+    squash = lambda t: re.sub(r" +", " ", t)  # noqa: E731
+    assert squash(q.render()) == squash(p.render())
+
+
+def test_a_graph_made_in_pds_gui_loads_verbatim(tmp_path):
+    """Put > Array with 'save contents' on: flags 3 and #A data. Not what
+    Patch.graph writes, so it stays py2pd's Graph, every record kept."""
+    gui = ("#N canvas 0 50 450 300 10;\n"
+           "#N canvas 0 50 450 250 (subpatch) 0;\n#X array tune 8 float 3;\n"
+           "#A 0 0 0.25 0.5 0.75\n1 0.75 0.5 0.25;\n"
+           "#X coords 0 1 8 -1 200 140 1 0 0;\n#X restore 60 40 graph;\n")
+    (tmp_path / "gui.pd").write_text(gui, encoding="utf-8")
+    q = Patch.load(tmp_path / "gui.pd")
+    (node,) = q.pd.nodes
+    assert type(node).__name__ == "Graph" and not isinstance(node, Graph)
+    assert "#A 0 0 0.25 0.5 0.75\n1 0.75 0.5 0.25;" in q.render()
+
+
+def test_extract_sees_the_table_a_loaded_graph_allocates(tmp_path):
+    _graphed_patch().save(tmp_path / "g.pd")
+    q = Patch.load(tmp_path / "g.pd")
+    reader = next(n for n in q.pd.nodes if getattr(n, "parameters", {}).get("text") == "tabread tune")
+    plan = extraction_plan(q, [reader])
+    assert plan["shared"].get("tune") == "table"
+
+
+def test_pd_reads_a_gui_graphs_saved_contents_after_load_and_save(tmp_path, run_pd):
+    """The proof that matters: a graph with saved contents, loaded and saved
+    again by pdbuild, still holds its values in Pd."""
+    src = ("#N canvas 0 50 450 300 10;\n#X obj 20 20 loadbang;\n"
+           "#N canvas 0 50 450 250 (subpatch) 0;\n#X array tune 8 float 3;\n"
+           "#A 0 0 0.25 0.5 0.75\n1 0.75 0.5 0.25;\n"
+           "#X coords 0 1 8 -1 200 140 1 0 0;\n#X restore 60 40 graph;\n"
+           "#X obj 20 200 t b b;\n#X msg 20 230 3;\n#X obj 20 260 tabread tune;\n"
+           "#X obj 20 290 print val;\n#X msg 120 230 \; pd quit;\n"
+           # [t b b]: right outlet reads index 3, then the left one quits
+           "#X connect 0 0 2 0;\n#X connect 2 1 3 0;\n#X connect 3 0 4 0;\n"
+           "#X connect 4 0 5 0;\n#X connect 2 0 6 0;\n")
+    (tmp_path / "src.pd").write_text(src, encoding="utf-8")
+    Patch.load(tmp_path / "src.pd").save(tmp_path / "again.pd")
+    console = run_pd(tmp_path / "again.pd", cwd=tmp_path)
+    assert "val: 0.75" in console, console

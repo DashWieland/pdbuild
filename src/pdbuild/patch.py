@@ -54,6 +54,9 @@ OBJECT_IO: dict[str, tuple[int, int]] = {
     "cos~": (1, 1),
     "tabwrite~": (1, 0),
     # control
+    "del": (2, 1),         # py2pd knows [delay] but not its alias
+    "table": (0, 0),       # a named array with no ports
+    "tabread4": (1, 1),    # the control-rate one (py2pd knows only tabread4~)
     "mtof": (1, 1),
     "ftom": (1, 1),
     "dbtorms": (1, 1),
@@ -128,8 +131,40 @@ def object_io(text: str) -> tuple[int, int] | None:
         return (max(int(float(n)), 1), 0) if _is_number(n) else None
     if cls == "file" and len(parts) > 1:
         return _FILE_IO.get(parts[1])
+    if cls == "list":
+        # [list] and [list 1 2] are [list append]; an unknown verb does not create
+        verb = parts[1] if len(parts) > 1 and not _is_number(parts[1]) else "append"
+        return _LIST_IO.get(verb)
+    if cls == "array" and len(parts) > 1:
+        return _ARRAY_IO.get(parts[1])
 
     return OBJECT_IO.get(cls)
+
+
+# [list <verb>] and [array <verb>]: the arity depends on the verb. Each checked
+# against Pd 0.56.2 by connecting past the last port. py2pd gave every list
+# verb one outlet, which refused a link from [list split]'s 2nd and 3rd.
+_LIST_IO: dict[str, tuple[int, int]] = {
+    "append": (2, 1),
+    "prepend": (2, 1),
+    "split": (2, 3),       # the first n | the rest | the whole list, if shorter than n
+    "trim": (1, 1),
+    "length": (1, 1),
+    "fromsymbol": (1, 1),
+    "tosymbol": (1, 1),
+    "store": (2, 2),
+}
+_ARRAY_IO: dict[str, tuple[int, int]] = {
+    "define": (1, 1),
+    "size": (2, 1),
+    "get": (3, 1),         # the last inlet takes the table name
+    "set": (3, 0),
+    "sum": (3, 1),
+    "random": (3, 1),
+    "quantile": (4, 1),
+    "max": (3, 2),         # the value | its index
+    "min": (3, 2),
+}
 
 
 # [file <verb>]: the arity depends on the verb; only the ones verified on Pd.
@@ -226,6 +261,42 @@ class Graph(Node):
         return (self.parameters["w"], self.parameters["h"])
 
 
+def _as_graph(node) -> Graph | None:
+    """The ``Graph`` a loaded py2pd graph node is, if it is exactly what
+    ``Patch.graph`` writes; None for any other graph (kept verbatim)."""
+    recs = getattr(node, "records", None)
+    if getattr(node, "canvas", None) != "0 50 450 250 (subpatch) 0" or recs is None or len(recs) != 2:
+        return None
+    a, c = recs[0].rstrip(";").split(), recs[1].rstrip(";").split()
+    if a[:2] != ["#X", "array"] or len(a) != 6 or a[4] != "float" or c[:2] != ["#X", "coords"] or len(c) != 11:
+        return None
+    styles = {v: k for k, v in GRAPH_STYLES.items()}
+    try:
+        flags = int(a[5])
+        style = styles.get((flags >> 1) & 3)
+        if style is None or flags & ~0b1110:         # the save bit (1) or anything unknown
+            return None
+        p = node.parameters
+        g = Graph(a[2].replace("\\$", "$"), int(a[3]), p["x_pos"], p["y_pos"], int(c[6]), int(c[7]),
+                  float(c[5]), float(c[3]), style=style, hide_name=bool(flags & 8))
+    except (ValueError, KeyError):
+        return None
+    return g if str(g) == str(node) else None
+
+
+def _adopt_graphs(patcher) -> None:
+    """Swap each loaded graph that ``Patch.graph`` wrote for our ``Graph``, in
+    place (a graph has no ports, so no connection refers to it), inside
+    subpatches too."""
+    for i, node in enumerate(patcher.nodes):
+        if type(node).__name__ == "Graph" and not isinstance(node, Graph):
+            ours = _as_graph(node)
+            if ours is not None:
+                patcher.nodes[i] = ours
+        elif hasattr(node, "src") and hasattr(node.src, "nodes"):
+            _adopt_graphs(node.src)
+
+
 class Patch:
     """A py2pd Patcher plus a placement cursor and our Pd idioms."""
 
@@ -268,11 +339,13 @@ class Patch:
 
         Goes through py2pd's ``parse_file`` -> ``to_builder``, which is
         lossless for the patches we care about (audio renders identically, the
-        file round-trips essentially byte-for-byte). Patches using ``#X
-        declare`` or graph-on-parent are not yet supported on this path -- see
-        the extract roadmap. A file holding a graph (``Patch.graph``) is
-        refused outright: py2pd raises ``ParseError: Invalid restore line``
-        on its ``#X restore x y graph``.
+        file round-trips essentially byte-for-byte). ``#X declare`` is not yet
+        supported on this path -- see the extract roadmap.
+
+        Graph-on-parent arrays load. One written by ``Patch.graph`` comes back
+        as a ``Graph`` (so it re-saves byte for byte and previews as a graph);
+        any other -- one made in Pd's GUI with its contents saved, say -- stays
+        py2pd's ``Graph``, which keeps every record verbatim.
 
         Records the file's directory as ``source_dir`` so a later ``extract``
         can find the sibling abstraction files this patch instantiates.
@@ -280,7 +353,9 @@ class Patch:
         from pathlib import Path as _Path
         from py2pd import parse_file, to_builder
         kw.setdefault("source_dir", _Path(str(path)).resolve().parent)
-        return cls.wrap(to_builder(parse_file(str(path))), **kw)
+        patcher = to_builder(parse_file(str(path)))
+        _adopt_graphs(patcher)
+        return cls.wrap(patcher, **kw)
 
     # -- placement ---------------------------------------------------------
     def cursor(self, x: int, y: int) -> None:

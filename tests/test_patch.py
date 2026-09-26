@@ -199,6 +199,17 @@ def test_floatatom_receive_is_separate_from_send():
     ("file isfile", (1, 2)),
     ("file which", None),                                  # not verified: left to py2pd
     ("osc~ 440", None),          # py2pd knows this one; defer to it
+    ("del 100", (2, 1)),
+    ("table steps 16", (0, 0)),
+    ("tabread4 steps", (1, 1)),
+    ("list", (2, 1)),                                     # [list] is [list append]
+    ("list 1 2", (2, 1)),
+    ("list split 2", (2, 3)),    # py2pd said one outlet
+    ("list store", (2, 2)),
+    ("list bogus", None),                                 # does not create
+    ("array get steps", (3, 1)),
+    ("array max steps", (3, 2)),
+    ("array bogus steps", None),
 ])
 def test_object_io_arity(text, expected):
     assert object_io(text) == expected
@@ -225,7 +236,8 @@ def test_multi_expression_expr_links_from_every_outlet():
 # sink (it takes control and signal alike), so only the index can fail. The
 # whole OBJECT_IO table is in it (bar externals), plus the computed arities.
 _ARGS = {"delwrite~": "delwrite~ arity_line 100", "delread~": "delread~ arity_line 10",
-         "vd~": "vd~ arity_line", "tabwrite~": "tabwrite~ arity_table"}
+         "vd~": "vd~ arity_line", "tabwrite~": "tabwrite~ arity_table",
+         "del": "del 100", "table": "table arity_table 16", "tabread4": "tabread4 arity_table"}
 PD_ARITY = [_ARGS.get(cls, cls) for cls in OBJECT_IO if "/" not in cls] + [
     "expr $f1 + $f2; $f1 * $f2; $f1 - $f2",
     "expr $i1 + $i2",
@@ -237,6 +249,11 @@ PD_ARITY = [_ARGS.get(cls, cls) for cls in OBJECT_IO if "/" not in cls] + [
     "writesf~",
     "file patchpath",
     "file isfile",
+    "list", "list 1 2", "list append", "list prepend", "list split 2", "list trim",
+    "list length", "list fromsymbol", "list tosymbol", "list store",
+    "array define arity_array 8", "array size arity_table", "array get arity_table",
+    "array set arity_table", "array sum arity_table", "array random arity_table",
+    "array quantile arity_table", "array max arity_table", "array min arity_table",
 ]
 
 

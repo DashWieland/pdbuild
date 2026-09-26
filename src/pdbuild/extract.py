@@ -183,6 +183,10 @@ _RESOURCE_CLASSES = {
     "tabwrite~": ("table", "w"), "tabsend~": ("table", "w"),
     "tabread~": ("table", "r"), "tabread4~": ("table", "r"),
     "tabreceive~": ("table", "r"), "tabplay~": ("table", "r"),
+    "tabosc4~": ("table", "r"),
+    # control rate: a step sequencer's [tabread steps] is as much a use of the
+    # table as a wavetable's [tabread4~]
+    "tabread": ("table", "r"), "tabread4": ("table", "r"), "tabwrite": ("table", "w"),
     "table": ("table", "w"),
     "value": ("value", "rw"), "v": ("value", "rw"),
 }
@@ -190,8 +194,10 @@ _RESOURCE_CLASSES = {
 # the same name is what makes Pd say "multiply defined" -- and it is not always
 # the writer: [catch~] allocates the bus that [throw~] merely feeds.
 _ALLOCATORS = {
-    "delwrite~", "catch~", "send~", "s~", "table", "array",
+    "delwrite~", "catch~", "send~", "s~", "table",
 }
+# ...and of the [array <verb>] family only `define` allocates; get/set/size/
+# sum/... use a table someone else defined (see _allocates)
 # Kinds whose allocation is instance-visible at all. Sends and values are just
 # names in a global namespace; sharing them across instances is normal.
 _ALLOCATING = {"delay", "sigbus", "table"}
@@ -211,9 +217,11 @@ def _resource_uses(text: str) -> list[tuple[int, str, str, str]]:
     parts = text.split()
     if len(parts) < 2:
         return []
-    # [array define foo] / [array set foo] put the name one token further along
+    # [array define foo] / [array get foo] put the name one token further along;
+    # define and set write, size can set a size, the rest (get, sum, ...) read
     if parts[0] == "array" and len(parts) > 2:
-        return [(2, parts[2], "table", "w")]
+        role = {"define": "w", "set": "w", "size": "rw"}.get(parts[1], "r")
+        return [(2, parts[2], "table", role)]
     cls = parts[0]
     spec = _RESOURCE_CLASSES.get(cls)
     if spec is None:
@@ -227,6 +235,18 @@ def _resource_uses(text: str) -> list[tuple[int, str, str, str]]:
     if _is_number(name):
         return []
     return [(1, name, kind, role)]
+
+
+def _allocates(text: str) -> bool:
+    """Does this box allocate the name it carries? [array get foo] does not:
+    counting every [array ...] as an allocator made two readers of one table
+    look like two definitions of it."""
+    parts = text.split()
+    if not parts:
+        return False
+    if parts[0] == "array":
+        return len(parts) > 1 and parts[1] == "define"
+    return parts[0] in _ALLOCATORS
 
 
 def _is_number(tok: str) -> bool:
@@ -580,8 +600,7 @@ def extraction_plan(patch, region, *, broadcast: Sequence[str] = ()) -> dict:
 
     for n in patch.pd.nodes:
         inside = id(n) in region_ids
-        cls = node_text(n).split()[:1]
-        allocates = bool(cls) and cls[0] in _ALLOCATORS
+        allocates = _allocates(node_text(n))
         renameable, fixed = _node_resources(n)
         for rname, kind, role in renameable:
             _record(rname, kind, role, inside, True, allocates)

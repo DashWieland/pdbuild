@@ -617,3 +617,62 @@ def test_resolve_ports_ordered_by_x(tmp_path):
     p = Patch(); inst = p.obj("x")
     assert resolve_signal_outlet(inst, 0, [str(tmp_path)]) is True   # the x=40 outlet~
     assert resolve_signal_outlet(inst, 1, [str(tmp_path)]) is False  # the x=200 outlet
+
+
+# --------------------------------------------------------------------------- #
+# Table uses at control rate, and the [array] verbs (0.9.1)
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("text,expected", [
+    ("tabread steps", [(1, "steps", "table", "r")]),
+    ("tabread4 steps", [(1, "steps", "table", "r")]),
+    ("tabwrite steps", [(1, "steps", "table", "w")]),
+    ("tabosc4~ wave", [(1, "wave", "table", "r")]),
+    ("array get wave", [(2, "wave", "table", "r")]),
+    ("array set wave", [(2, "wave", "table", "w")]),
+    ("array size wave", [(2, "wave", "table", "rw")]),
+    ("array sum wave", [(2, "wave", "table", "r")]),
+    ("array define wave 64", [(2, "wave", "table", "w")]),
+])
+def test_table_uses_at_control_rate_and_the_array_verbs(text, expected):
+    """A step sequencer's [tabread steps] uses the table as surely as a
+    wavetable's [tabread4~ wave]; extract only saw the signal-rate ones."""
+    assert _resource_uses(text) == expected
+
+
+def test_a_control_rate_reader_is_seen_crossing_the_cut():
+    """The region reads a table defined outside it. Before 0.9.1 the plan did
+    not list the table at all, as if the extracted part used nothing."""
+    p = Patch()
+    tb = p.obj("table steps 16")
+    m = p.obj("metro 250"); tr = p.obj("tabread steps"); pr = p.obj("print step")
+    p.link(m, 0, tr, 0); p.link(tr, 0, pr, 0)
+    plan = extraction_plan(p, [m, tr, pr])
+    assert plan["shared"].get("steps") == "table"
+    assert "steps" not in plan["namespace"]
+    assert tb is not None
+
+
+def test_array_get_is_not_a_second_definition():
+    """[array get wave] reads a table someone else defined. Counting every
+    [array ...] as an allocator warned that two instances would 'collide' on
+    a table they only read."""
+    p = Patch()
+    p.obj("table wave 64")
+    rd = p.obj("tabread~ wave"); out = p.obj("dac~")
+    p.link(rd, 0, out, 0)
+    b = p.obj("bang"); ag = p.obj("array get wave"); pr = p.obj("print wave")
+    p.link(b, 0, ag, 0); p.link(ag, 0, pr, 0)
+    plan = extraction_plan(p, [b, ag, pr])
+    assert not any("wave" in w for w in plan["warnings"]), plan["warnings"]
+    assert plan["shared"].get("wave") == "table"
+
+
+def test_array_define_inside_the_cut_still_warns():
+    """The allocator itself inside, a reader outside: that one does collide."""
+    p = Patch()
+    ad = p.obj("array define wave 64")
+    rd = p.obj("tabread~ wave"); out = p.obj("dac~")
+    p.link(rd, 0, out, 0)
+    plan = extraction_plan(p, [ad])
+    assert any("wave" in w for w in plan["warnings"]), plan["warnings"]

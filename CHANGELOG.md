@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.9.1 — graphs load back, extract sees every table use, more objects validated
+
+These are the follow-ups 0.9.0 left open. Tests: 283 → 310. Every arity is
+checked against Pd 0.56.2.
+
+### `Patch.load()` reads graphs
+
+- It needs the py2pd fork at 11baaf2 or later, which parses
+  `#X restore x y graph`, keeps `#A` saved contents, and writes `#X coords`
+  as Pd does.
+- A graph `Patch.graph` wrote comes back as a `Graph`, with its records
+  byte for byte. Any other graph, such as one made in Pd's GUI with its
+  contents saved, stays py2pd's `Graph`, which keeps every record verbatim.
+- `extract` and `preview` treat both kinds as graphs.
+- Verified in Pd: a GUI graph with saved contents, loaded and saved again,
+  still reads 0.75 at index 3.
+
+### `extract` sees every table use
+
+- `[tabread]`, `[tabread4]` and `[tabwrite]` (control rate) and `[tabosc4~]`
+  are table uses. A step sequencer's `[tabread steps]` crossed a cut
+  unseen, and the plan did not list the table at all.
+- The `[array]` verbs have their own roles: `define` and `set` write, `size`
+  reads and writes, and `get`, `sum` and the others read. Only
+  `array define` allocates. Every `[array …]` used to count as a
+  definition, so extracting an `[array get wave]` warned that instances
+  would collide on a table they only read.
+
+### `object_io` declares more objects
+
+- `[del]` has 2 inlets and 1 outlet; py2pd knew `[delay]` but not the
+  alias. `[table]` has none of either. Control-rate `[tabread4]` has 1 of
+  each.
+- The `[list …]` verbs:
+  - `append`, `prepend` and a bare `[list]`: 2 inlets, 1 outlet;
+  - `split`: 2 inlets, **3 outlets**;
+  - `trim`, `length`, `fromsymbol` and `tosymbol`: 1 inlet, 1 outlet;
+  - `store`: 2 inlets, 2 outlets.
+
+  py2pd gave every verb one outlet, which refused a link from
+  `[list split]`'s second and third outlets. An unknown verb doesn't
+  create an object, so it is left undeclared.
+- The `[array …]` verbs:
+  - `define`: 1 inlet, 1 outlet;
+  - `size`: 2 inlets, 1 outlet;
+  - `get`, `sum` and `random`: 3 inlets, 1 outlet;
+  - `set`: 3 inlets, 0 outlets;
+  - `quantile`: 4 inlets, 1 outlet;
+  - `max` and `min`: 3 inlets, 2 outlets (the value, then its index).
+
 ## 0.9.0 — graphs a player can see, multi-expression expr, takes that never overwrite
 
 Lifted from the `overtone` build (its field log, lessons 6 and 7). That script
