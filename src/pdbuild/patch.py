@@ -24,8 +24,9 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from py2pd import Patcher
+from py2pd.api import Node
 
-__all__ = ["Patch", "OBJECT_IO", "object_io"]
+__all__ = ["Patch", "Graph", "GRAPH_STYLES", "OBJECT_IO", "object_io"]
 
 
 # Objects py2pd does not carry counts for. Only entries we are confident
@@ -146,6 +147,83 @@ def _is_number(tok: str) -> bool:
     return True
 
 
+# Array plot styles, numbered as the `#X array` flags field counts them.
+GRAPH_STYLES: dict[str, int] = {"polygon": 0, "points": 1, "bezier": 2}
+
+
+def _atom(v) -> str:
+    """A number as a .pd atom: integral values without a trailing '.0'."""
+    f = float(v)
+    return str(int(f)) if f.is_integer() else repr(f)
+
+
+class Graph(Node):
+    """A graph-on-parent array: a table the player can see on the canvas.
+
+    Four records, the way Pd itself saves one::
+
+        #N canvas 0 50 450 250 (subpatch) 0;
+        #X array tune 24 float 10;             <- flags: 2*style, +8 hides the name
+        #X coords 0 16.5 24 5.5 400 220 1 0 0; <- x from/to, y top/bottom values, w h
+        #X restore 20 300 graph;
+
+    It is ONE box on the parent canvas, so it takes one connection index there
+    like any object; it has no inlets or outlets. (py2pd's ``add_array``
+    writes a bare ``#X array``: a table, but nothing to look at.) Built by
+    ``Patch.graph``; Pd 0.56.2 re-saves these four records unchanged.
+    """
+
+    def __init__(self, name: str, size: int, x: int, y: int, w: int, h: int,
+                 ylo: float, yhi: float, *, style: str = "points",
+                 hide_name: bool = True) -> None:
+        if style not in GRAPH_STYLES:
+            raise ValueError(f"unknown graph style {style!r}; one of {tuple(GRAPH_STYLES)}")
+        if int(size) < 1:
+            raise ValueError(f"a graph needs at least one point, got size {size}")
+        if float(ylo) == float(yhi):
+            raise ValueError("ylo and yhi must differ: they are the values at the bottom and top edges")
+        self.parameters = {
+            "x_pos": int(x), "y_pos": int(y), "name": name, "size": int(size),
+            "w": int(w), "h": int(h), "ylo": ylo, "yhi": yhi,
+            "style": style, "hide_name": bool(hide_name),
+        }
+        self.num_inlets = 0
+        self.num_outlets = 0
+
+    @property
+    def flags(self) -> int:
+        """The ``#X array`` flags field: 2 * style, + 8 to hide the name. (+1
+        would save the contents into the file; ``Patch.graph`` never sets it,
+        so what the engine writes at run time is not frozen in on a save.)"""
+        p = self.parameters
+        return 2 * GRAPH_STYLES[p["style"]] + (8 if p["hide_name"] else 0)
+
+    @property
+    def x_range(self) -> int:
+        """The index at the right edge, fitted the way Pd fits a graph to its
+        array: points draw each value one index wide (``size``); a polygon or
+        bezier puts its last vertex on the edge (``size - 1``)."""
+        n = self.parameters["size"]
+        return n if self.parameters["style"] == "points" or n == 1 else n - 1
+
+    def __str__(self) -> str:
+        p = self.parameters
+        name = re.sub(r"(?<!\\)\$(?=\d)", r"\\$", p["name"])   # $0-tune -> \$0-tune
+        return (
+            "#N canvas 0 50 450 250 (subpatch) 0;\n"
+            f"#X array {name} {p['size']} float {self.flags};\n"
+            f"#X coords 0 {_atom(p['yhi'])} {self.x_range} {_atom(p['ylo'])} {p['w']} {p['h']} 1 0 0;\n"
+            f"#X restore {p['x_pos']} {p['y_pos']} graph;\n"
+        )
+
+    def __repr__(self) -> str:
+        return f"Graph({self.parameters['name']!r}, {self.parameters['size']})"
+
+    @property
+    def dimensions(self) -> tuple[int, int]:
+        return (self.parameters["w"], self.parameters["h"])
+
+
 class Patch:
     """A py2pd Patcher plus a placement cursor and our Pd idioms."""
 
@@ -190,7 +268,9 @@ class Patch:
         lossless for the patches we care about (audio renders identically, the
         file round-trips essentially byte-for-byte). Patches using ``#X
         declare`` or graph-on-parent are not yet supported on this path -- see
-        the extract roadmap.
+        the extract roadmap. A file holding a graph (``Patch.graph``) is
+        refused outright: py2pd raises ``ParseError: Invalid restore line``
+        on its ``#X restore x y graph``.
 
         Records the file's directory as ``source_dir`` so a later ``extract``
         can find the sibling abstraction files this patch instantiates.
@@ -279,6 +359,49 @@ class Patch:
         px, py = self._place(x, y)
         return self.pd.add_abstraction(name, num_inlets=inlets,
                                        num_outlets=outlets, x_pos=px, y_pos=py)
+
+    def graph(self, name: str, size: int, x: int, y: int, w: int, h: int,
+              ylo: float, yhi: float, *, style: str = "points",
+              hide_name: bool = True, editable: bool = False) -> Graph:
+        """A graph-on-parent array: ``size`` values of the table ``name``
+        drawn in a ``w`` x ``h`` box at ``(x, y)``, the bottom edge standing
+        for ``ylo`` and the top for ``yhi``.
+
+        The cheapest visual feedback Pd has: a tune, a step pattern, a lane of
+        flags the player can watch. Write it like any table -- ``[tabwrite
+        name]``, ``; name 0 v0 v1 ...``, ``[array set name]``. It takes one
+        connection index in this patch and has no inlets or outlets.
+
+        **Pd does not clip an array to its graph.** A value outside ``[ylo,
+        yhi]`` is drawn outside the box, over whatever is next to it, so the
+        range must contain every value the patch will ever write. (A lane of
+        0/1 flags: ``ylo=0, yhi=1.5`` draws the 1s inside and lays the 0s on
+        the bottom edge.)
+
+        ``style`` is ``"points"`` (each value a dash one index wide),
+        ``"polygon"`` or ``"bezier"``. ``hide_name`` hides the name Pd draws
+        over the graph. ``editable=False`` (the default) sends ``; name edit
+        0`` from the shared loadbang: in run mode Pd lets a mouse drag draw
+        into any array, so a display would otherwise be an input that writes
+        arbitrary -- fractional, out-of-scale -- values into the engine's
+        table. The edit state is not saved in the file, hence the message.
+        That message is plumbing and goes at the placement cursor, like
+        ``init()``'s, so keep the cursor off the face (``Patch(origin=...)``
+        past the panel). An instance-local name (``$0-tune``, for a graph
+        inside an abstraction) is locked through ``[edit 0( -> [s $0-tune]``
+        instead: a message box expands ``$0`` to 0 (Pd 0.56.2), so ``; $0-tune
+        edit 0`` would go to ``0-tune``.
+        """
+        g = Graph(name, size, x, y, w, h, ylo, yhi, style=style, hide_name=hide_name)
+        self.pd.nodes.append(g)
+        if not editable:
+            if "$" in name:
+                lock = self.msg("edit 0")
+                self.link(lock, 0, self.obj(f"s {name}"), 0)
+            else:
+                lock = self.msg(f"; {name} edit 0")
+            self.link(self.loadbang(), 0, lock, 0)
+        return g
 
     # -- wiring ------------------------------------------------------------
     def link(self, src, outlet: int, sink, inlet: int = 0) -> None:

@@ -283,15 +283,22 @@ def _node_resources(node) -> tuple[list[tuple[str, str, str]], list[tuple[str, s
             fixed.append((sym, "send", role))
 
     # An array declares a table name that tabread~/tabwrite~ reference. py2pd
-    # models it as its own node type. Match on the type, not on the presence of
-    # a `name` parameter -- a [pd foo] subpatch has one too, and treating that
-    # as a table produced bogus collision warnings.
-    if type(node).__name__ == "Array":
+    # models it as its own node type (and Patch.graph's Graph holds one). Match
+    # on the type, not on the presence of a `name` parameter -- a [pd foo]
+    # subpatch has one too, and treating that as a table produced bogus
+    # collision warnings.
+    if _declares_array(node):
         arr = params.get("name")
         if isinstance(arr, str) and arr:
             fixed.append((arr, "table", "rw"))
 
     return renameable, fixed
+
+
+def _declares_array(node) -> bool:
+    """A bare ``#X array`` (py2pd's Array) or a graph-on-parent array
+    (``Patch.graph``): either allocates the table its ``name`` parameter names."""
+    return type(node).__name__ in ("Array", "Graph")
 
 
 def node_text(node) -> str:
@@ -579,8 +586,7 @@ def extraction_plan(patch, region, *, broadcast: Sequence[str] = ()) -> dict:
         for rname, kind, role in renameable:
             _record(rname, kind, role, inside, True, allocates)
         for rname, kind, role in fixed:
-            _record(rname, kind, role, inside, False,
-                    type(n).__name__ == "Array")
+            _record(rname, kind, role, inside, False, _declares_array(n))
 
     namespace: dict[str, str] = {}
     shared: dict[str, str] = {}
