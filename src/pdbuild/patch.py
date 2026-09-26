@@ -30,11 +30,13 @@ __all__ = ["Patch", "OBJECT_IO", "object_io"]
 
 # Objects py2pd does not carry counts for. Only entries we are confident
 # about: a wrong count here would raise on a connection that is actually
-# fine, which is worse than not validating at all.
+# fine, which is worse than not validating at all. Every entry is checked
+# against Pd 0.56.2 by tests/test_patch.py::test_declared_arity_agrees_with_pd.
 OBJECT_IO: dict[str, tuple[int, int]] = {
     # filters / DSP
     "bob~": (3, 1),        # audio, cutoff, resonance
-    "rev3~": (2, 4),
+    "rev3~": (6, 4),       # in L, in R, then level / liveness / crossover / damping
+                           # (was (2, 4): a link to the level inlet was refused)
     "vline~": (3, 1),
     "phasor~": (2, 1),
     "vd~": (1, 1),
@@ -46,7 +48,7 @@ OBJECT_IO: dict[str, tuple[int, int]] = {
     "hip~": (2, 1),
     "bp~": (3, 1),
     "vcf~": (3, 2),
-    "noise~": (0, 1),
+    "noise~": (1, 1),      # the inlet takes `seed <n>` (was (0, 1))
     "sig~": (1, 1),
     "cos~": (1, 1),
     "tabwrite~": (1, 0),
@@ -55,9 +57,11 @@ OBJECT_IO: dict[str, tuple[int, int]] = {
     "ftom": (1, 1),
     "dbtorms": (1, 1),
     "rmstodb": (1, 1),
+    "until": (2, 1),
+    "makefilename": (1, 1),
     # i/o
     "outlet~": (1, 0),
-    "inlet~": (0, 1),
+    "inlet~": (1, 2),      # outlet 1: control data sent to the signal inlet (was (0, 1))
     "outlet": (1, 0),
     "inlet": (0, 1),
     # IEM GUIs (py2pd leaves these unknown, so a mis-wired control went unchecked)
@@ -72,7 +76,11 @@ OBJECT_IO: dict[str, tuple[int, int]] = {
     "else/pad": (1, 2),    # list x y, click
 }
 
-_EXPR_VAR = re.compile(r"\$[fvs](\d+)")
+# An [expr] family inlet per variable number: $f/$i/$s (control), $v (expr~
+# signal vector), $x (fexpr~ input sample). $y is an fexpr~ OUTPUT's past
+# samples and opens no inlet. (Each verified on Pd 0.56.2 by connecting one
+# past the last port, which Pd refuses: "... connection failed".)
+_EXPR_VAR = re.compile(r"\$[fisvx](\d+)")
 
 # The escapes py2pd's own escape() adds: `\,` `\;` and `\$<digit>`. Stripping
 # them first makes obj()/msg()/comment() idempotent -- text a caller already
@@ -90,6 +98,13 @@ def object_io(text: str) -> tuple[int, int] | None:
 
     Handles the objects whose arity depends on their arguments, which a flat
     table cannot express.
+
+    ``[expr]`` / ``[expr~]`` / ``[fexpr~]`` take one inlet per variable number
+    (the highest ``$f2``/``$i2``/``$s2``/``$v2``/``$x2`` gives two) and one
+    outlet per expression: ``expr $f1 + $f2; $f1 * $f2`` (written ``\\;`` in
+    the file) has two. A multi-expression expr fires its outlets **right to
+    left**, the last expression first, so a ``[pack]`` fed from outlets
+    0..n-1 packs them in order: outlet 0 reaches the hot inlet last.
     """
     parts = text.split()
     if not parts:
@@ -97,13 +112,38 @@ def object_io(text: str) -> tuple[int, int] | None:
     cls = parts[0]
 
     if cls in ("expr", "expr~", "fexpr~"):
-        # one inlet per distinct $f1/$v1/$s1 variable, at least one
-        idx = [int(m) for m in _EXPR_VAR.findall(text)]
-        return (max(idx) if idx else 1, 1)
+        body = text.split(None, 1)[1] if len(parts) > 1 else ""
+        idx = [int(m) for m in _EXPR_VAR.findall(body)]
+        # ';' separates expressions; in file text it is escaped '\;', which
+        # leaves a stray backslash on the segment before it
+        exprs = [e for e in body.split(";") if e.strip(" \\\t\r\n")]
+        return (max(idx) if idx else 1, max(len(exprs), 1))
     if cls in ("pack", "pack~"):
         return (max(len(parts) - 1, 1), 1)
+    if cls == "writesf~":
+        # [writesf~ N]: one signal inlet per channel (the first takes the
+        # open/start/stop messages too); N defaults to 1
+        n = parts[1] if len(parts) > 1 else "1"
+        return (max(int(float(n)), 1), 0) if _is_number(n) else None
+    if cls == "file" and len(parts) > 1:
+        return _FILE_IO.get(parts[1])
 
     return OBJECT_IO.get(cls)
+
+
+# [file <verb>]: the arity depends on the verb; only the ones verified on Pd.
+_FILE_IO: dict[str, tuple[int, int]] = {
+    "patchpath": (1, 2),   # symbol -> "<patch dir>/<symbol>" (left); bang -> the directory
+    "isfile": (1, 2),      # an existing file -> 1 (left); a missing one BANGS the right outlet
+}
+
+
+def _is_number(tok: str) -> bool:
+    try:
+        float(tok)
+    except ValueError:
+        return False
+    return True
 
 
 class Patch:

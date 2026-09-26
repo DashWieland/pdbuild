@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from pdbuild import Patch, object_io
+from pdbuild import OBJECT_IO, Patch, object_io
 
 
 # --------------------------------------------------------------------------- #
@@ -171,7 +171,7 @@ def test_floatatom_receive_is_separate_from_send():
 
 @pytest.mark.parametrize("text,expected", [
     ("bob~", (3, 1)),
-    ("rev3~ 0 72 2200 55", (2, 4)),
+    ("rev3~ 0 72 2200 55", (6, 4)),          # was (2, 4): Pd has four control inlets after the two signals
     ("else/pad 100 100", (1, 2)),
     ("mtof", (1, 1)),
     ("pack f f", (2, 1)),
@@ -179,10 +179,89 @@ def test_floatatom_receive_is_separate_from_send():
     ("expr~ tanh($v1)", (1, 1)),
     ("expr 15000/$f1", (1, 1)),
     ("expr $f1 + $f2", (2, 1)),
+    # one outlet per ';'-separated expression, in either spelling
+    ("expr $f1 + $f2; $f1 * $f2", (2, 2)),
+    ("expr $f1 \\; $f1*2 \\; $f1*3", (1, 3)),
+    ("expr~ $v1*2; $v1*3; $f2", (2, 3)),
+    ("expr if($f1 > 0, $f1, 0)", (1, 1)),                 # commas are arguments, not separators
+    ("expr $f1;", (1, 1)),                                 # a trailing ';' opens no expression
+    # every variable kind that opens an inlet ($i and $x were missed before)
+    ("expr $i1 + $i2", (2, 1)),
+    ("expr $s2", (2, 1)),
+    ("fexpr~ $x1[0] + $x2[0]; $y1[-1]*0.5 + $x1[0]", (2, 2)),   # $y: an OUTPUT's past, no inlet
+    ("expr $f1 * \\$1", (1, 1)),                           # a creation-arg dollar is not a variable
+    # the RECORD machinery
+    ("writesf~ 2", (2, 0)),
+    ("writesf~", (1, 0)),
+    ("until", (2, 1)),
+    ("makefilename take_%03d.wav", (1, 1)),
+    ("file patchpath", (1, 2)),
+    ("file isfile", (1, 2)),
+    ("file which", None),                                  # not verified: left to py2pd
     ("osc~ 440", None),          # py2pd knows this one; defer to it
 ])
 def test_object_io_arity(text, expected):
     assert object_io(text) == expected
+
+
+def test_multi_expression_expr_links_from_every_outlet():
+    """REGRESSION (overtone): `[expr a; b]` was declared with ONE outlet, so
+    py2pd refused a link from outlet 1 and the build had to carry its own
+    `mexpr` helper. Every expression's outlet links; one past the last fails."""
+    from py2pd import PdConnectionError
+    p = Patch()
+    e = p.obj("expr $f1 + $f2; $f1 * $f2; $f1 - $f2")
+    pk = p.obj("pack f f f")
+    for k in range(3):
+        p.link(e, k, pk, k)
+    assert "expr $f1 + $f2 \\;" in p.render()                 # ';' written escaped in the file
+    with pytest.raises(PdConnectionError):
+        p.link(e, 3, pk, 0)
+
+
+# Arity claims checked against Pd itself: for each, a connection into the last
+# inlet and out of the last outlet must load, and one past either end must be
+# refused. [f] is the source (a control outlet may feed any inlet) and [*~] the
+# sink (it takes control and signal alike), so only the index can fail. The
+# whole OBJECT_IO table is in it (bar externals), plus the computed arities.
+_ARGS = {"delwrite~": "delwrite~ arity_line 100", "delread~": "delread~ arity_line 10",
+         "vd~": "vd~ arity_line", "tabwrite~": "tabwrite~ arity_table"}
+PD_ARITY = [_ARGS.get(cls, cls) for cls in OBJECT_IO if "/" not in cls] + [
+    "expr $f1 + $f2; $f1 * $f2; $f1 - $f2",
+    "expr $i1 + $i2",
+    "expr $s2",
+    "expr~ $v1*2; $v1*3; $f2",
+    "fexpr~ $x1[0] + $x2[0]; $y1[-1]*0.5 + $x1[0]",
+    "pack f f 1",
+    "writesf~ 2",
+    "writesf~",
+    "file patchpath",
+    "file isfile",
+]
+
+
+def test_declared_arity_agrees_with_pd(tmp_path, run_pd):
+    p = Patch()
+    q = p.msg("; pd quit", 20, 10)
+    p.link(p.loadbang(), 0, q, 0)
+    expect_ok, expect_fail = set(), set()
+    for k, text in enumerate(PD_ARITY):
+        x, y = 20 + 260 * (k % 5), 80 + 100 * (k // 5)
+        src, obj, sink = p.obj("f", x, y), p.obj(text, x, y + 30), p.obj("*~", x, y + 60)
+        idx = {id(n): p.pd.nodes.index(n) for n in (obj, src, sink)}
+        ins, outs = object_io(text)
+        for inlet in ([ins - 1] if ins else []) + [ins]:
+            (expect_ok if inlet < ins else expect_fail).add((idx[id(src)], 0, idx[id(obj)], inlet))
+        for outlet in ([outs - 1] if outs else []) + [outs]:
+            (expect_ok if outlet < outs else expect_fail).add((idx[id(obj)], outlet, idx[id(sink)], 0))
+    # written raw: the one-past connections are exactly what validation refuses to emit
+    extra = "".join(f"#X connect {a} {o} {b} {i};\n" for a, o, b, i in sorted(expect_ok | expect_fail))
+    path = tmp_path / "arity.pd"
+    path.write_text(p.render() + "\n" + extra, encoding="utf-8")
+    console = run_pd(path, cwd=tmp_path)
+    assert "couldn't create" not in console, console
+    refused = run_pd.refused(console)
+    assert refused == expect_fail, (sorted(refused ^ expect_fail), console)
 
 
 def test_declared_io_makes_validation_fire():
