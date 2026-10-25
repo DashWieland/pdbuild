@@ -250,14 +250,16 @@ All confirmed to load and render under `pd -nogui -batch -noaudio` on 0.56.
 | `osc~` / `phasor~` | sine / ramp | freq inlet accepts a **signal** (drive it from `line~` for glide) |
 | `phasor~` → `-~ 0.5` | sawtooth | centre it or you feed the filter DC |
 | `bob~` | Moog-ladder **resonant** lowpass | in / **cutoff (signal)** / **resonance (signal)**. >4 self-oscillates; keep ≲3.6. `oversample 3` message for stability at high cutoff+Q. The acid filter. |
-| `lop~` / `hip~` / `bp~` | 1-pole LP / HP / bandpass | `lop~` cutoff is **control-rate only** — to LFO it, sample the LFO with `[snapshot~]` on a `[metro]` |
+| `lop~` / `hip~` / `bp~` | 1-pole LP / HP / bandpass | `lop~` cutoff is **control-rate only** — to LFO it, sample the LFO with `[snapshot~]` on a `[metro]`. **6 dB/octave**: `[hip~ 300]` → `[lop~ 3000]` on white noise keeps only 37 % of the energy in 300–3000 Hz (62 % lies above; measured). Four `biquad~` Butterworth sections keep 88 %, 97 % within a quarter beyond the edges |
+| `biquad~` | any 2-pole section | args `fb1 fb2 ff1 ff2 ff3` (Pd's form: fb = −a1, −a2); **a list of 5 floats into its one inlet sets them**. Coefficients are sample-rate specific: compute them at load from `[samplerate~]` with a 5-expression `[expr]` → `[pack f f f f f]`, as `modules.noise_bed` does, or a 48 kHz run moves every edge by 9 % |
 | `vline~` | sample-accurate envelopes | `"1 3, 0 210 3"` = ramp to 1 over 3 ms, then from 3 ms ramp to 0 over 210 ms. The AD workhorse |
 | `line~` | control→signal ramps | `"target time"`; also the portamento/glide engine |
 | `expr~ tanh($v1)` | soft saturation | drive into it with `*~` for "meat" |
 | `clip~ -1 1` | safety limiter | put one before `dac~`, always |
 | `delwrite~` / `delread~` / `vd~` | delay | `vd~`'s delay time is a **signal** → LFO it for chorus. `delread~` is a fixed tap |
-| `rev3~` | reverb | **2-in / 4-out**; args = level, liveness(%), crossover(Hz), damping(%) |
-| `noise~` | drums/texture | + `bp~` = snare, + `hip~ 7000` = hat |
+| `rev3~` | reverb | **6-in** (L, R, then level / liveness / crossover / damping) **/ 4-out**; args = level, liveness(%), crossover(Hz), damping(%). `rev1~`–`rev3~` are abstractions in Pd's `extra/`, not built-ins: they load headless on a desktop install (found on the default `extra` path; verified 0.56.2) but are absent where `extra/` is (libpd, pd4web builds that don't copy it). `modules.reverb` is an 8-line FDN from primitives instead |
+| `noise~` | drums/texture | + `bp~` = snare, + `hip~ 7000` = hat. **Takes `seed <n>`** in its inlet (0.56.2; seeds are per object), which makes it independent of creation order — send it at load |
+| `random N` | control randomness | **`seed <n>`** resets it. Seed on the *first tick* rather than from a loadbang if a metro started by another loadbang might draw first: fan-out order from one `[loadbang]` is undefined (`modules.scale_walk`: `[t b b]` → `[spigot 1]` latch → seeds, then the draw) |
 | `mtof` | MIDI → Hz | |
 | `else/pad` (ELSE) | X-Y control surface | outlet emits `list x y` **and** `click` → split with `[route list click]`; coords range = the creation-arg `dim` |
 | `[file patchpath]` | a path beside the patch | a symbol in → `<patch dir>/<symbol>` out the left (a space in the directory is fine: it stays one symbol); a bang → the directory |
@@ -362,7 +364,37 @@ they made.
 - `clip~ -1 1` before `dac~`.
 - `hip~ ~25` to kill DC/subsonic — an un-driven `osc~` sits at 0 Hz, which is a
   DC offset, not silence.
-- Keep feedback gains < ~0.6 and clip inside the loop.
+- Keep feedback gains < ~0.6 and clip inside the loop — for a *single* delay
+  line. A feedback delay **network** is the exception: mix N lines through an
+  orthogonal matrix (Hadamard / √N, butterflies of `[+~]`/`[-~]`) and give
+  line i the gain `10**(-3 d_i / RT60)`; it is stable by construction up to
+  RT60 = 10 s with no clip in the loop (20 s of noise into `modules.reverb`
+  at its longest settles at a constant level). Its energy gain is about
+  `RT60 / (13.8 · mean line length)` per line, so scale the taps by the
+  inverse square root or a long hall is 10 dB louder than a room.
+
+### Delay loops can't be shorter than a block
+A `[delwrite~]`/`[delread~]` feedback loop has at least one block (64
+samples) of delay, so a Karplus-Strong string on a plain canvas cannot play
+above 44100/64 = **689 Hz**. Either put the loop in a `[block~ 1]`
+subpatch or abstraction, or, for a pluck, sum a few
+harmonics with exponential decays instead (`modules.pluck`: exact at any
+pitch). An exponential decay is a straight line in dB: `[vline~]` ramping
+100 → 0 into `[dbtorms~]`, which also retriggers from wherever it is,
+without a click.
+
+### Loop-locked LFOs: restart a ramp, don't free-run a phasor
+`[phasor~]` keeps its phase in 32-bit fixed point and drifts 3–6 × 10⁻⁶
+of a cycle per cycle (measured from a 32-bit capture, 0.56.2): after an hour
+a 4 s loop's ramp is ~15 ms off the loop. (`[osc~]` measured far tighter,
+under 3 × 10⁻⁷ of a cycle after 42 s, so a sine LFO at a whole number of
+cycles per loop is fine; it is ramps, triangles and anything shaped from a
+`[phasor~]` that drift.) A `[metro <loop_ms>]` restarting
+`[vline~]` with `0, 1 <loop_ms>` rides the scheduler's double-precision
+logical time with sub-sample starts: under 2 × 10⁻⁶ of a cycle after a
+minute, ~100× tighter, and locked to every other `[metro]` in the patch
+(`modules.loop_lfo`). The phase reset inlet of `[phasor~]` is no fix: it
+lands on the next block boundary, up to 64 samples late.
 
 ---
 
@@ -416,7 +448,8 @@ pdverify is what makes blind construction viable. The techniques that paid off:
    with the clock stopped (`control.bang("shaker")`, `run=0`) and read the
    windowed RMS *at the output*.
 10. **Same notes, different render — the differential measurement.** Pd's
-   `random`/`noise~` seeds are fixed by creation order, so two renders of one
+   `random`/`noise~` seeds are fixed by creation order (unless a `seed <n>`
+   message sets them, which the ambient modules all do), so two renders of one
    patch with only an effect control changed play identical notes. Then the
    per-window 1/3-octave *difference* between the renders is the effect and
    nothing else: a phaser showed as −20 dB notches walking from 400 Hz to
@@ -470,6 +503,19 @@ pdverify is what makes blind construction viable. The techniques that paid off:
    *Disk writes*: run in real time (`pd -nogui -noaudio` with a driver patch
    sending `; record 1`, `; record 0` and `; pd quit` on delays). pdbuild's
    tests have a `run_pd` fixture for all three.
+
+17. **Know the capture's resolution.** pdverify writes its capture as 16-bit
+   WAV, so nothing below ~3 × 10⁻⁵ of full scale is measurable in
+   `RenderResult.audio` -- a drift claim needs a bare Pd run that writes
+   `[soundfiler]` `write -wave -bytes 4` (32-bit float; `read_wav` reads it).
+   And a bare `pd -batch` runs at **48 kHz** unless given `-r 44100`: read
+   the rate back from the file instead of assuming it (`tests/test_ambient.py
+   ::_capture32`).
+18. **Whole-spectrum flatness can't see band-limited noise.** A 300–3000 Hz
+   noise bed reads flatness 0.000 ("inharmonic") in `Report`, because the
+   empty spectrum outside the band drags the geometric mean to nothing. To
+   tell noise from tone in a band, compute flatness over the band itself
+   (Welch-averaged: noise 0.99, a drone in the same band 4 × 10⁻⁶).
 
 ### What verification can't do
 It confirms *health* (silent/clip/NaN), *tuning*, and *gross character*

@@ -293,6 +293,9 @@ dac = p.obj("dac~"); p.link(wide, 0, dac, 0); p.link(wide, 0, dac, 1)
 | | patterns | `step_tables` — per-pulse tables, one message per preset, the intensity-tier gate (`0 < level ≤ INTENSITY`), preset change restarts the bar; `gated_value` |
 | | melody | `melody_loop` — a Turing-machine loop: phrase bank → table, DENSITY priority mask, per-pass MUTATE from a scale-aware generator, rests release, accents by rank, bar-aligned on reset |
 | | scales | `euclid` / `euclid_rows`, `scale_tables`, `scale_degree` (degree → fractional MIDI: scale table + tonic + neutral offset — maqam quarter tones) |
+| **ambient tier** | space | `reverb` — an 8-line feedback delay network from vanilla primitives (input diffusers, Hadamard mixing, damping, slow line wobble); `size` sets RT60 0.4–10 s; returns a `Stereo` (`.left`, `.right`); `mix=0` is the input, sample for sample |
+| | sources | `drone` — sine partials, each breathing on its own slow LFO; `pluck` — decaying harmonics, round-robin polyphony, exact at any pitch; `noise_bed` — seeded noise through 24 dB/oct Butterworth edges with a swell and a water-like flutter |
+| | time | `loop_lfo` — exactly N cycles per loop, restarted by the scheduler (no drift); `scale_walk` — a seeded random walk over a scale on each clock tick, thinned by `density` without changing the melody |
 
 **Voices generate; processors transform; the control tier makes the
 triggers.** A signal processor takes a signal and returns a signal; a voice
@@ -317,14 +320,32 @@ loop  = melody_loop(p, phrases=["0 . 0 2 . 3 4 . 3 2 . 1  0 . 0 3 . 4 3 . 2 0 . 
 # [r note_in] -> "degree velocity"; feed scale_degree -> mtof -> a voice
 ```
 
+The ambient tier is a calm generative piece's toolkit, vanilla Pd only, and
+reproducible: everything random takes a `seed`, so two renders are identical.
+
+```python
+from pdbuild.modules import drone, noise_bed, pluck, reverb, scale_walk
+
+clock = p.obj("metro 375"); p.init(clock, 1)
+walk  = scale_walk(p, clock, scale=(0, 2, 4, 7, 9), tonic=57, density=0.45, seed=11)
+hz    = p.obj("mtof"); p.link(walk.midi, 0, hz, 0)
+notes = pluck(p, None, hz, decay=2.5)                 # trigger=None: every pitch plays
+bed   = drone(p, 110.0, gain=0.12, loop_s=12.0)       # LFOs rounded to whole cycles per 12 s
+air   = noise_bed(p, lo=600, hi=4000, seed=7, gain=0.025)
+bus = p.obj("+~"); p.link(notes, 0, bus, 0); p.link(bed, 0, bus, 1)
+mix = p.obj("+~"); p.link(bus, 0, mix, 0); p.link(air, 0, mix, 1)
+room = reverb(p, mix, size=0.7, damping=0.45, mix=0.35)
+dac = p.obj("dac~"); p.link(room.left, 0, dac, 0); p.link(room.right, 0, dac, 1)
+```
+
 **"Verified" is the point.** Every module's claim is backed by a rendered
 measurement, not by reading the patch — a lowpass drops the centroid, saturation
 grows odd harmonics on a sine, a subtractive voice plays the note it was asked
 for, a kick reads low and punchy, the swung clock reads uneven intervals with
 the same mean, the locked loop repeats beat for beat (pdverify's
 `loop_similarity`) and the mutating one diverges. A port is a node (its
-outlet 0) or a `(node, outlet)` pair. Allocating modules (delay, chorus) take a
-`Patch.uid()` buffer name, so two never collide.
+outlet 0) or a `(node, outlet)` pair. Allocating modules (delay, chorus,
+reverb, scale_walk's tables) take `Patch.uid()` names, so two never collide.
 
 ## Control surfaces — `pdbuild.surface`
 

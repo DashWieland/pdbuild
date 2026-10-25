@@ -1,5 +1,88 @@
 # Changelog
 
+## 0.10.0 — ambient modules
+
+A fourth module tier, `pdbuild.modules.ambient`: the blocks of a calm,
+generative ambient piece (drone, sparse plucked notes, a water-like noise
+bed, reverb, seamless loops). A participant wanting one found nothing to
+start from and wrote it in numpy. Vanilla Pd only (no externals, nothing from
+`extra/`), and everything random is seeded, so a render is reproducible bit
+for bit. Tests: 40 new in `tests/test_ambient.py`, each with a control that
+would fail it. Every number below is measured in Pd 0.56.2.
+
+### The modules
+
+- **`reverb(patch, sig, *, size, damping, mix, decay_s, predelay_ms,
+  diffusion, mod_ms) -> Stereo`**: predelay, four input allpass diffusers
+  and an eight-line feedback delay network (Hadamard mixing, a damping
+  `[lop~]` in each line, line lengths wobbled ±0.3 ms), tapped on two
+  orthogonal rows for decorrelated L/R. `size` 0..1 sets RT60 =
+  0.4 · 25^size s. Measured RT60 (Schroeder T20) 0.72 / 1.86 / 4.9 s at
+  size 0.2 / 0.5 / 0.8 against 0.76 / 2.0 / 5.25 nominal. 20 s of noise at
+  size 1, no damping: finite, settled (RMS 0.072 at 5–10 s and at 15–20 s).
+  L/R |r| < 0.06. Damping 0.8 moves the late tail's centroid from 4.3 kHz
+  to 330 Hz. The wet level is normalised by RT60 (noise in at 0.1 RMS: 0.080
+  / 0.062 / 0.050 out for size 0.2 / 0.6 / 1.0). `mix=0` is the input,
+  sample for sample. A `Stereo` or `[left, right]` input keeps a stereo dry
+  path.
+- **`drone(patch, pitch, *, partials, lfo_rates, lfo_depth, loop_s,
+  glide_ms, gain)`**: sine partials `(ratio, gain)`, each on its own slow
+  amplitude LFO (0.03–0.11 Hz by default, spread start phases). 99.99 % of
+  the power on the 110 Hz series (A#2's: 0 %); level wanders 5.4 dB over 30 s
+  and moves at most 0.06 dB between neighbouring 50 ms windows; `lfo_depth=0`
+  is steady (0.01 dB). `loop_s` rounds every rate to whole cycles per loop:
+  the second 8 s matches the first to 16-bit rounding.
+- **`pluck(patch, trigger, pitch, *, decay, brightness, partials, voices,
+  attack_ms, gain)`**: harmonics with exponential decays (a line in dB into
+  `[dbtorms~]`; the upper partials die sooner), dealt round-robin to
+  `voices`. `trigger=None` plays every pitch that arrives. Not
+  Karplus-Strong, because a Pd delay loop is at least a block, which caps a
+  plain-canvas string at 689 Hz; f0 measured 219.99 / 880.01 / 1500.01 Hz.
+  It rises in 3.3 ms and is 40 dB down at 0.70 s (`decay=1`) and 2.00 s
+  (`decay=3`). Brightness 0.1 → 0.8 moves the centroid 221 → 399 Hz. Four
+  voices hold a three-note chord where one voice keeps only the last note.
+- **`noise_bed(patch, *, lo, hi, swell_rate, swell_depth, flutter,
+  flutter_hz, seed, loop_s, gain)`**: seeded `[noise~]` → 24 dB/oct
+  Butterworth highpass and lowpass (`[biquad~]` sections whose coefficients
+  are recomputed from `[samplerate~]` at load) → a sine swell × a seeded,
+  lowpassed-noise flutter. 88 % of the energy in 300–3000 Hz, 97 % within a
+  quarter beyond the edges. The edges sit at −2.6 to −2.8 dB at 44.1 and
+  48 kHz alike. RMS = `gain`. In-band flatness 0.99 (a drone in the band:
+  4e-6). The level envelope peaks at the swell rate. One seed gives the
+  same bed with or without another `[noise~]` built before it.
+- **`loop_lfo(patch, *, loop_s, cycles, phase, shape, lo, hi)`**: exactly
+  `cycles` cycles per loop, sine / triangle / ramp over `lo..hi`. The phase
+  is a ramp a `[metro]` restarts every loop through `[vline~]`, not a
+  free-running `[phasor~]`. From a 32-bit capture over 60 s: under 2e-6 of
+  a cycle after a minute (4e-7 for a 3-cycle ramp over a 7 s loop), where
+  `[phasor~]` at the same 3/7 Hz is off by 1.0e-4.
+- **`scale_walk(patch, clock, *, scale, tonic, seed, step_weights, density,
+  lo, hi, start, density_recv) -> ScaleWalk`**: a seeded random walk over
+  scale degrees on each clock tick, with probability `density`. `.midi`
+  emits the note; `.degree` emits the degree, for `scale_degree` and its
+  table bank. One `[random]` decides whether a tick plays and another picks
+  the step, drawn only when a note plays, so the sparse walk is the dense
+  walk's opening, note for note. Both are seeded on the first tick, which
+  makes the walk independent of loadbang order and of other `[random]`s
+  built before it. Over ~170 ticks, density 0.2 plays 40 notes and 0.8
+  plays 139.
+
+A composed test patch (scale_walk → pluck, a drone and a noise bed into the
+reverb) renders unclipped at −26.9 dBFS RMS, with 14 onsets in 12 s, and two
+renders are identical. pdverify calls it "A very dynamic, warm, bass-heavy
+chord with no single clear pitch".
+
+### Also
+
+- `OBJECT_IO` declares `biquad~` (1, 1), `dbtorms~` (1, 1), `max~` /
+  `min~` (2, 1) and `samplerate~` (1, 1), checked against Pd by the arity
+  test.
+- COOKBOOK: `biquad~` and band edges, seeding `[noise~]` / `[random]`,
+  `rev1~`–`rev3~` living in `extra/`, the one-block floor on delay loops,
+  FDN stability, `[phasor~]` drift, pdverify's 16-bit capture, bare Pd's
+  48 kHz default, and why whole-spectrum flatness can't see band-limited
+  noise. The `rev3~` row said 2 inlets; it has 6.
+
 ## 0.9.1 — graphs load back, extract sees every table use, more objects validated
 
 These are the follow-ups 0.9.0 left open. Tests: 283 → 310. Every arity is

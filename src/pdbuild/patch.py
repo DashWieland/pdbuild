@@ -53,6 +53,11 @@ OBJECT_IO: dict[str, tuple[int, int]] = {
     "sig~": (1, 1),
     "cos~": (1, 1),
     "tabwrite~": (1, 0),
+    "biquad~": (1, 1),     # a list of 5 coefficients into the one inlet sets them
+    "dbtorms~": (1, 1),
+    "max~": (2, 1),
+    "min~": (2, 1),
+    "samplerate~": (1, 1),
     # control
     "del": (2, 1),         # py2pd knows [delay] but not its alias
     "table": (0, 0),       # a named array with no ports

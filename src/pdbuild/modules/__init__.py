@@ -18,7 +18,7 @@ pulled into a reusable abstraction with ``pdbuild.extract``.
     dac = p.obj("dac~")
     p.link(wide, 0, dac, 0); p.link(wide, 0, dac, 1)
 
-Three tiers, each render-verified:
+Four tiers, each render-verified:
 
 * **signal processors** -- general-purpose DSP blocks (a lowpass darkens,
   saturation adds harmonics, a delay leaves an audible tail);
@@ -27,13 +27,19 @@ Three tiers, each render-verified:
   clock, per-pulse step tables with intensity tiers, a mutating melody loop,
   Euclidean rows and a scale-degree lookup. These read control receives and
   broadcast named sends (``pulse``, ``bar``, ``note_in``) that voices listen
-  to -- the broadcast-clock idiom.
+  to -- the broadcast-clock idiom;
+* **ambient** -- the slow, spacious blocks of a calm generative piece: a
+  stereo reverb, a breathing drone, a soft polyphonic pluck, a noise bed, a
+  loop-locked LFO and a seeded scale walk. Vanilla only, seeded, reproducible.
 
 Input / control *surfaces* are ``pdbuild.surface``.
 """
 
 from __future__ import annotations
 
+from .ambient import (
+    ScaleWalk, Stereo, drone, loop_lfo, noise_bed, pluck, reverb, scale_walk,
+)
 from .control import glide, smooth
 from .drums import hat, kick, snare
 from .effects import chorus, delay, saturate
@@ -63,4 +69,7 @@ __all__ = [
     "swing_clock", "step_tables", "gated_value", "melody_loop",
     "phrase_steps", "step_priority", "REST", "HOLD",
     "euclid", "euclid_rows", "scale_tables", "scale_degree",
+    # --- ambient tier ---
+    "reverb", "drone", "pluck", "noise_bed", "loop_lfo", "scale_walk",
+    "Stereo", "ScaleWalk",
 ]
